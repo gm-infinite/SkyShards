@@ -21,6 +21,9 @@ type InventoryRecipeNode = Extract<
 // the shard's real minCost so cheaper freely-usable shards are consumed first.
 const FREELY_USABLE_RESIDUAL = 0.02;
 
+const FORCE_CROCODILE_SUCCESS_LEVEL = 50; // -> crocodileMultiplier = 2 ("every reptile fuse doubles")
+const FORCE_CROCODILE_FAIL_LEVEL = 0; // -> crocodileMultiplier = 1 ("no reptile fuse doubles")
+
 export class InvCalculationService {
   private static instance: InvCalculationService;
   // Share the singleton: a private instance would keep its own dataCache and
@@ -32,6 +35,46 @@ export class InvCalculationService {
       InvCalculationService.instance = new InvCalculationService();
     }
     return InvCalculationService.instance;
+  }
+
+  /**
+   * Given a tree that's already been built (recipe choices AND
+   * inventory/craft/farm decisions all fixed by a single real calculation),
+   * replays quantities through that *same* structure assuming every eligible
+   * Crocodile fuse always doubles ("min") or never doubles ("max"). This
+   * does NOT re-run recipe/inventory selection — it's the same plan, scored
+   * under its best-case and worst-case luck, matching how the Calculator tab
+   * itself models Crocodile (expected value of one fixed plan), just pushed
+   * to the two extremes instead of blended per-fuse.
+   */
+  computeMinMaxFromTree(
+    tree: InventoryRecipeTree,
+    requiredQuantity: number,
+    parsed: Data,
+    params: CalculationParams
+  ): {
+    min: { totalQuantities: Map<string, number>; totalTime: number };
+    max: { totalQuantities: Map<string, number>; totalTime: number };
+  } {
+    const minTree = structuredClone(tree);
+    const maxTree = structuredClone(tree);
+
+    const minParams: CalculationParams = { ...params, crocodileLevel: FORCE_CROCODILE_SUCCESS_LEVEL };
+    const maxParams: CalculationParams = { ...params, crocodileLevel: FORCE_CROCODILE_FAIL_LEVEL };
+
+    this.recalculateTreeQuantities(minTree, requiredQuantity, parsed, minParams);
+    this.recalculateTreeQuantities(maxTree, requiredQuantity, parsed, maxParams);
+
+    const minStats = this.service.collectTreeStats(minTree, minParams);
+    const maxStats = this.service.collectTreeStats(maxTree, maxParams);
+
+    const minTotalTime = this.service.calculateTotalTimeFromQuantities(minStats.totalQuantities, minStats.craftTime, parsed, minParams);
+    const maxTotalTime = this.service.calculateTotalTimeFromQuantities(maxStats.totalQuantities, maxStats.craftTime, parsed, maxParams);
+
+    return {
+      min: { totalQuantities: minStats.totalQuantities, totalTime: minTotalTime },
+      max: { totalQuantities: maxStats.totalQuantities, totalTime: maxTotalTime },
+    };
   }
 
   // Updates quantity and derived fields for a tree node.

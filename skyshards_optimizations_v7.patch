@@ -1,0 +1,297 @@
+diff --git a/src/components/results/ShardOptimizationsPanel.tsx b/src/components/results/ShardOptimizationsPanel.tsx
+index 0dec93e..865c0a7 100644
+--- a/src/components/results/ShardOptimizationsPanel.tsx
++++ b/src/components/results/ShardOptimizationsPanel.tsx
+@@ -127,7 +127,8 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+               <p className="text-xs text-slate-400">
+                 Every shard you still need to farm directly to max every attribute, combined across all of them — in both
+                 extremes: <span className="text-white">min</span> assumes every Crocodile fuse doubles, <span className="text-white">max</span>{" "}
+-                assumes none do.
++                assumes none do. <span className="text-white">From Stock</span> is how much of that shard the plan is already
++                covering from your inventory elsewhere in the tree — don't farm that part again.
+               </p>
+               {result.shoppingRows.length === 0 ? (
+                 <EmptyRow text="Nothing left to farm — your inventory covers everything." />
+@@ -139,6 +140,7 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+                         <th className="font-medium pb-1.5 pl-1">Shard</th>
+                         <th className="font-medium pb-1.5 text-right">Min Qty</th>
+                         <th className="font-medium pb-1.5 text-right">Max Qty</th>
++                        <th className="font-medium pb-1.5 text-right">From Stock</th>
+                         <th className="font-medium pb-1.5 text-right pr-1">Min → Max Time</th>
+                       </tr>
+                     </thead>
+@@ -153,6 +155,13 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+                           </td>
+                           <td className="py-1.5 text-right text-slate-300">{Math.ceil(row.minQuantity)}x</td>
+                           <td className="py-1.5 text-right text-slate-300">{Math.ceil(row.maxQuantity)}x</td>
++                          <td className="py-1.5 text-right">
++                            {row.substitutedQuantity > 0 ? (
++                              <span className="text-emerald-400 font-medium">{Math.floor(row.substitutedQuantity)}x</span>
++                            ) : (
++                              <span className="text-slate-600">—</span>
++                            )}
++                          </td>
+                           <td className="py-1.5 text-right pr-1 text-fuchsia-300 font-medium whitespace-nowrap">
+                             {formatTime(row.minTime)} → {formatTime(row.maxTime)}
+                           </td>
+@@ -174,11 +183,39 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+           )}
+ 
+           {activeTab === "chameleon" && (
+-            <PriorityList
+-              description="Top 10 shards across your whole remaining grind that can be obtained via a Chameleon Shard fusion, ranked by total gather time — the ones most worth spending a chameleon on."
+-              entries={result.chameleonPriority}
+-              emptyText="No shard in your combined shopping list has a chameleon fusion recipe."
+-            />
++            <div className="space-y-2">
++              <p className="text-xs text-slate-400">
++                Top 10 shards across your whole remaining grind that have a Chameleon fusion recipe, ranked by how long each
++                normally takes to farm. <span className="text-white">Needed qty</span> is how much of that shard you still
++                need overall (not a chameleon count) — <span className="text-white">chameleons to fully replace</span> is the
++                actual number of Chameleon Shards it'd take to skip farming all of it, which is usually far more than you
++                own. Use this to decide where the few chameleons you have go furthest, not as a shopping target.
++              </p>
++              {result.chameleonPriority.length === 0 ? (
++                <EmptyRow text="No shard in your combined shopping list has a chameleon fusion recipe." />
++              ) : (
++                <ol className="space-y-1.5">
++                  {result.chameleonPriority.map((entry, i) => (
++                    <li
++                      key={entry.shardId}
++                      className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
++                    >
++                      <div className="flex items-center min-w-0">
++                        <span className="text-slate-500 text-xs w-5 flex-shrink-0">{i + 1}.</span>
++                        <ShardIcon shardId={entry.shardId} name={entry.name} />
++                        <div className="min-w-0">
++                          <span className="text-white text-sm truncate block">{entry.name}</span>
++                          <span className="text-slate-400 text-xs">
++                            {Math.ceil(entry.quantity)}x needed • {entry.chameleonsForFullReplacement}x chameleons to fully replace
++                          </span>
++                        </div>
++                      </div>
++                      <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">{formatTime(entry.totalGatherTime)}</span>
++                    </li>
++                  ))}
++                </ol>
++              )}
++            </div>
+           )}
+ 
+           {activeTab === "shortest" && (
+diff --git a/src/services/index.ts b/src/services/index.ts
+index 9411011..cbdcbef 100644
+--- a/src/services/index.ts
++++ b/src/services/index.ts
+@@ -5,6 +5,7 @@ export { ShardOptimizationService } from "./shardOptimizationService";
+ export type {
+   MinMaxShoppingList,
+   ShardTimeEntry,
++  ChameleonPriorityEntry,
+   ShortestToMaxEntry,
+   ShoppingListRow,
+   GlobalOptimizationResult,
+diff --git a/src/services/shardOptimizationService.ts b/src/services/shardOptimizationService.ts
+index 020dcff..7e35f7d 100644
+--- a/src/services/shardOptimizationService.ts
++++ b/src/services/shardOptimizationService.ts
+@@ -2,7 +2,7 @@ import { CalculationService } from "./calculationService";
+ import { InvCalculationService } from "./invCalculationService";
+ import { getShardsNeededToMax } from "../data/attributeLevelingCosts";
+ import { getTrappableShardIds } from "../data/trappableShardNames";
+-import type { CalculationParams, Data, RecipeOverride } from "../types/types";
++import type { CalculationParams, Data, InventoryRecipeTree, RecipeOverride } from "../types/types";
+ 
+ const CHAMELEON_SHARD_ID = "L4";
+ 
+@@ -24,6 +24,8 @@ export interface MinMaxShoppingList {
+   successWeight: number;
+   /** Inventory left over after the real plan claimed what it needed from the pool it was given. */
+   remainingInventory?: Map<string, number>;
++  /** How much of each shard the real plan drew from stock (method "inventory" nodes) instead of farming/crafting fresh — luck-independent, same for min and max since both replay the same tree. */
++  inventoryUsage: Map<string, number>;
+ }
+ 
+ export interface ShardTimeEntry {
+@@ -35,6 +37,17 @@ export interface ShardTimeEntry {
+   totalGatherTime: number;
+ }
+ 
++export interface ChameleonPriorityEntry extends ShardTimeEntry {
++  /**
++   * How many Chameleon Shards it would actually take to fully replace
++   * farming this shard's whole remaining `quantity` via its chameleon
++   * fusion recipe. This is a theoretical ceiling, not a suggestion to spend
++   * that many — it's here so the ranking (by totalGatherTime) doesn't read
++   * as "you need this many chameleons," which it isn't.
++   */
++  chameleonsForFullReplacement: number;
++}
++
+ export interface ShortestToMaxEntry {
+   shardId: string;
+   name: string;
+@@ -52,6 +65,8 @@ export interface ShoppingListRow {
+   maxQuantity: number;
+   minTime: number;
+   maxTime: number;
++  /** How much of this shard the plan is drawing from your existing stock instead of farming — don't farm this part again! */
++  substitutedQuantity: number;
+ }
+ 
+ export interface ExcessInventoryEntry {
+@@ -68,7 +83,7 @@ export interface GlobalOptimizationResult {
+   /** Trappable shards from the combined shopping list, ranked by total gather time. */
+   trapPriority: ShardTimeEntry[];
+   /** Chameleon-fusable shards from the combined shopping list, ranked by total gather time. */
+-  chameleonPriority: ShardTimeEntry[];
++  chameleonPriority: ChameleonPriorityEntry[];
+   /** Sum of every candidate's blended total time (rough "everything left" estimate). */
+   combinedBlendedTotalTime: number;
+   candidateCount: number;
+@@ -127,6 +142,7 @@ export class ShardOptimizationService {
+     const successWeight = Math.max(0, Math.min(100, 2 * params.crocodileLevel)) / 100;
+ 
+     const real = await this.inv.calculateOptimalPath(targetShard, requiredQuantity, params, inventory, recipeOverrides, ownedAttributes);
++    const inventoryUsage = real.tree ? this.collectInventoryUsage(real.tree) : new Map<string, number>();
+ 
+     if (!real.tree) {
+       const scenario: ShoppingListScenario = { totalQuantities: real.totalQuantities, totalTime: real.totalTime };
+@@ -137,6 +153,7 @@ export class ShardOptimizationService {
+         blendedTimePerShard: 0,
+         successWeight,
+         remainingInventory: real.remainingInventory,
++        inventoryUsage,
+       };
+     }
+ 
+@@ -146,12 +163,35 @@ export class ShardOptimizationService {
+     const blendedTotalTime = successWeight * min.totalTime + (1 - successWeight) * max.totalTime;
+     const blendedTimePerShard = requiredQuantity > 0 ? blendedTotalTime / requiredQuantity : 0;
+ 
+-    return { min, max, blendedTotalTime, blendedTimePerShard, successWeight, remainingInventory: real.remainingInventory };
++    return { min, max, blendedTotalTime, blendedTimePerShard, successWeight, remainingInventory: real.remainingInventory, inventoryUsage };
++  }
++
++  /**
++   * Walks a fixed tree and sums up how much of each shard came from
++   * "inventory" (stock) nodes rather than being farmed or crafted fresh —
++   * i.e. exactly the substitution amounts the greedy scan is relying on.
++   * Independent of min/max luck since both replay the same tree structure.
++   */
++  private collectInventoryUsage(tree: InventoryRecipeTree, usage: Map<string, number> = new Map()): Map<string, number> {
++    if (Array.isArray(tree)) {
++      tree.forEach((node) => this.collectInventoryUsage(node, usage));
++      return usage;
++    }
++    if (tree.method === "inventory") {
++      usage.set(tree.shard, (usage.get(tree.shard) || 0) + tree.quantity);
++    } else if (tree.method === "recipe") {
++      this.collectInventoryUsage(tree.inputs[0], usage);
++      this.collectInventoryUsage(tree.inputs[1], usage);
++    } else if (tree.method === "cycle") {
++      this.collectInventoryUsage(tree.inputRecipe, usage);
++      tree.cycleInputs.forEach((node) => this.collectInventoryUsage(node, usage));
++    }
++    return usage;
+   }
+ 
+   /** Flattens combined min/max total-quantity maps into rows the UI can render directly. */
+-  computeShoppingListRows(minQuantities: Map<string, number>, maxQuantities: Map<string, number>, data: Data): ShoppingListRow[] {
+-    const shardIds = new Set<string>([...minQuantities.keys(), ...maxQuantities.keys()]);
++  computeShoppingListRows(minQuantities: Map<string, number>, maxQuantities: Map<string, number>, substitutedQuantities: Map<string, number>, data: Data): ShoppingListRow[] {
++    const shardIds = new Set<string>([...minQuantities.keys(), ...maxQuantities.keys(), ...substitutedQuantities.keys()]);
+     const rows: ShoppingListRow[] = [];
+ 
+     for (const shardId of shardIds) {
+@@ -163,6 +203,7 @@ export class ShardOptimizationService {
+ 
+       const minQuantity = minQuantities.get(shardId) ?? 0;
+       const maxQuantity = maxQuantities.get(shardId) ?? 0;
++      const substitutedQuantity = substitutedQuantities.get(shardId) ?? 0;
+ 
+       rows.push({
+         shardId,
+@@ -171,6 +212,7 @@ export class ShardOptimizationService {
+         maxQuantity,
+         minTime: unitTime * minQuantity,
+         maxTime: unitTime * maxQuantity,
++        substitutedQuantity,
+       });
+     }
+ 
+@@ -208,10 +250,40 @@ export class ShardOptimizationService {
+     return this.rankByGatherTime(minQuantities, data, (id) => trappableIds.has(id), limit);
+   }
+ 
+-  /** Top chameleon-fusable shards (by total gather time) from a combined min-case shopping list. */
+-  computeChameleonPriorityList(minQuantities: Map<string, number>, data: Data, limit = 10): ShardTimeEntry[] {
+-    const hasChameleonRecipe = (shardId: string) => (data.recipes[shardId] || []).some((r) => r.inputs.includes(CHAMELEON_SHARD_ID));
+-    return this.rankByGatherTime(minQuantities, data, hasChameleonRecipe, limit);
++  /**
++   * Top chameleon-fusable shards (by total gather time) from a combined
++   * min-case shopping list. `quantity` here is how much of that shard is
++   * still needed overall — NOT how many chameleons to use. See
++   * `chameleonsForFullReplacement` for that number specifically.
++   */
++  computeChameleonPriorityList(minQuantities: Map<string, number>, data: Data, params: CalculationParams, limit = 10): ChameleonPriorityEntry[] {
++    const { crocodileMultiplier } = this.calc.calculateMultipliers(params);
++    const chameleonFuseAmount = data.shards[CHAMELEON_SHARD_ID]?.fuse_amount ?? 1;
++    const entries: ChameleonPriorityEntry[] = [];
++
++    for (const [shardId, quantity] of minQuantities.entries()) {
++      const chameleonRecipes = (data.recipes[shardId] || []).filter((r) => r.inputs.includes(CHAMELEON_SHARD_ID));
++      if (chameleonRecipes.length === 0) continue;
++
++      const shard = data.shards[shardId];
++      if (!shard) continue;
++
++      const unitTime = this.calc.getDirectCost(shard, false);
++      if (!Number.isFinite(unitTime)) continue;
++
++      const bestOutputQty = Math.max(...chameleonRecipes.map((r) => this.calc.getEffectiveOutputQuantity(r, crocodileMultiplier)));
++      const chameleonsForFullReplacement = bestOutputQty > 0 ? Math.ceil(quantity / bestOutputQty) * chameleonFuseAmount : 0;
++
++      entries.push({
++        shardId,
++        name: shard.name,
++        quantity,
++        totalGatherTime: unitTime * quantity,
++        chameleonsForFullReplacement,
++      });
++    }
++
++    return entries.sort((a, b) => b.totalGatherTime - a.totalGatherTime).slice(0, limit);
+   }
+ 
+   /**
+@@ -285,6 +357,7 @@ export class ShardOptimizationService {
+     const shortestToMax: ShortestToMaxEntry[] = [];
+     const combinedMinQuantities = new Map<string, number>();
+     const combinedMaxQuantities = new Map<string, number>();
++    const combinedSubstitutedQuantities = new Map<string, number>();
+     let combinedBlendedTotalTime = 0;
+ 
+     // Greedy, longest-to-get first, ONE shared inventory pool that depletes
+@@ -323,6 +396,9 @@ export class ShardOptimizationService {
+       for (const [id, qty] of list.max.totalQuantities.entries()) {
+         combinedMaxQuantities.set(id, (combinedMaxQuantities.get(id) || 0) + qty);
+       }
++      for (const [id, qty] of list.inventoryUsage.entries()) {
++        combinedSubstitutedQuantities.set(id, (combinedSubstitutedQuantities.get(id) || 0) + qty);
++      }
+ 
+       if (list.remainingInventory) {
+         sharedInventory = list.remainingInventory;
+@@ -333,9 +409,9 @@ export class ShardOptimizationService {
+ 
+     shortestToMax.sort((a, b) => a.blendedTime - b.blendedTime);
+ 
+-    const shoppingRows = this.computeShoppingListRows(combinedMinQuantities, combinedMaxQuantities, data);
++    const shoppingRows = this.computeShoppingListRows(combinedMinQuantities, combinedMaxQuantities, combinedSubstitutedQuantities, data);
+     const trapPriority = this.computeTrapPriorityList(combinedMinQuantities, data, 10);
+-    const chameleonPriority = this.computeChameleonPriorityList(combinedMinQuantities, data, 10);
++    const chameleonPriority = this.computeChameleonPriorityList(combinedMinQuantities, data, params, 10);
+ 
+     // Whatever's left in the shared pool after every unmaxed attribute has
+     // claimed what it needs — genuinely idle stock the plan never touched.

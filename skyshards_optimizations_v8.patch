@@ -1,0 +1,132 @@
+diff --git a/src/components/results/ShardOptimizationsPanel.tsx b/src/components/results/ShardOptimizationsPanel.tsx
+index 865c0a7..a5cb399 100644
+--- a/src/components/results/ShardOptimizationsPanel.tsx
++++ b/src/components/results/ShardOptimizationsPanel.tsx
+@@ -232,7 +232,7 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+                       <div className="min-w-0">
+                         <span className={`text-sm truncate block ${getRarityColor(entry.rarity)}`}>{entry.name}</span>
+                         <span className="text-slate-500 text-xs">
+-                          Level {entry.currentLevel} → 10 • {entry.quantityNeeded} shards
++                          {entry.ownedCount}/{entry.maxCount} shards • {entry.quantityNeeded} more needed
+                         </span>
+                       </div>
+                     </div>
+diff --git a/src/data/attributeLevelingCosts.ts b/src/data/attributeLevelingCosts.ts
+index e877a3a..81ec79b 100644
+--- a/src/data/attributeLevelingCosts.ts
++++ b/src/data/attributeLevelingCosts.ts
+@@ -1,36 +1,27 @@
+ import type { Shard } from "../types/types";
++import { MAX_QUANTITIES } from "../constants";
+ 
+ /**
+- * Cumulative number of Attribute Shards that must be syphoned to reach a given
+- * level (index 0 => level 1, index 9 => level 10 / max) for each rarity.
+- * Source: Hypixel Skyblock's attribute leveling table. Higher rarities need
+- * fewer shards to max.
++ * IMPORTANT: `ownedAttributes` (from Hypixel import / `AttributeOwned.level`)
++ * holds the RAW number of shards already synthesized into that attribute —
++ * on the same 0-96/64/48/32/24 scale as `MAX_QUANTITIES`, NOT a 0-10 "level".
++ * This matches how `InventoryManagementModal` already displays it
++ * (`{attr.level}/{maxForRarity}`). An earlier version of this file modeled
++ * a fictional 0-10 level with its own per-level shard-cost table, which
++ * silently misread every raw count as a level and produced wrong "shards
++ * needed" numbers. There is no per-level curve to model here — leveling
++ * just consumes raw shards 1:1 up to the rarity's max.
+  */
+-export const CUMULATIVE_SHARDS_BY_RARITY: Record<Shard["rarity"], number[]> = {
+-  common: [1, 4, 9, 15, 22, 30, 40, 54, 72, 96],
+-  uncommon: [1, 3, 6, 10, 15, 21, 28, 36, 48, 64],
+-  rare: [1, 3, 6, 9, 13, 17, 22, 28, 36, 48],
+-  epic: [1, 2, 4, 6, 9, 12, 16, 20, 25, 32],
+-  legendary: [1, 2, 3, 5, 7, 9, 12, 15, 19, 24],
+-};
+ 
+-export const MAX_ATTRIBUTE_LEVEL = 10;
+-
+-/**
+- * Number of additional shards required to take an attribute of the given
+- * rarity from `currentLevel` (0 = not started) to max level (10).
+- * Returns 0 if already maxed.
+- */
+-export function getShardsNeededToMax(rarity: Shard["rarity"], currentLevel: number): number {
+-  const table = CUMULATIVE_SHARDS_BY_RARITY[rarity];
+-  if (!table) return 0;
+-
+-  const maxCumulative = table[MAX_ATTRIBUTE_LEVEL - 1];
+-  const clampedLevel = Math.max(0, Math.min(MAX_ATTRIBUTE_LEVEL, Math.floor(currentLevel)));
+-
+-  if (clampedLevel >= MAX_ATTRIBUTE_LEVEL) return 0;
+-  if (clampedLevel <= 0) return maxCumulative;
++/** Shards still needed to take an attribute from `ownedCount` (raw, already-synthesized shards) to its rarity's max. */
++export function getShardsNeededToMax(rarity: Shard["rarity"], ownedCount: number): number {
++  const max = MAX_QUANTITIES[rarity] ?? 0;
++  const owned = Math.max(0, Math.floor(ownedCount));
++  return Math.max(0, max - owned);
++}
+ 
+-  const ownedCumulative = table[clampedLevel - 1];
+-  return Math.max(0, maxCumulative - ownedCumulative);
++/** Whether an attribute is already fully maxed for its rarity, given a raw owned/synthesized count. */
++export function isAttributeMaxed(rarity: Shard["rarity"], ownedCount: number): boolean {
++  const max = MAX_QUANTITIES[rarity] ?? 0;
++  return ownedCount >= max;
+ }
+diff --git a/src/services/shardOptimizationService.ts b/src/services/shardOptimizationService.ts
+index 7e35f7d..cd66906 100644
+--- a/src/services/shardOptimizationService.ts
++++ b/src/services/shardOptimizationService.ts
+@@ -1,6 +1,7 @@
+ import { CalculationService } from "./calculationService";
+ import { InvCalculationService } from "./invCalculationService";
+ import { getShardsNeededToMax } from "../data/attributeLevelingCosts";
++import { MAX_QUANTITIES } from "../constants";
+ import { getTrappableShardIds } from "../data/trappableShardNames";
+ import type { CalculationParams, Data, InventoryRecipeTree, RecipeOverride } from "../types/types";
+ 
+@@ -52,7 +53,10 @@ export interface ShortestToMaxEntry {
+   shardId: string;
+   name: string;
+   rarity: string;
+-  currentLevel: number;
++  /** Raw shards already synthesized into this attribute (not a 0-10 level). */
++  ownedCount: number;
++  /** MAX_QUANTITIES[rarity] — the raw shard count a fully maxed attribute of this rarity has. */
++  maxCount: number;
+   quantityNeeded: number;
+   /** Blended (min/max crocodile) total time to acquire quantityNeeded of this shard. */
+   blendedTime: number;
+@@ -340,18 +344,18 @@ export class ShardOptimizationService {
+     const ranked = Object.keys(data.shards)
+       .map((shardId) => {
+         const shard = data.shards[shardId];
+-        const currentLevel = ownedAttributes.get(shardId) ?? 0;
+-        if (currentLevel >= 10) return null;
++        // ownedAttributes holds the RAW synthesized shard count (0..MAX_QUANTITIES[rarity]), not a 0-10 level.
++        const ownedCount = ownedAttributes.get(shardId) ?? 0;
+ 
+-        const quantityNeeded = getShardsNeededToMax(shard.rarity, currentLevel);
++        const quantityNeeded = getShardsNeededToMax(shard.rarity, ownedCount);
+         if (quantityNeeded <= 0) return null;
+ 
+         const unitTime = this.calc.getDirectCost(shard, false);
+         const rankTime = Number.isFinite(unitTime) ? unitTime * quantityNeeded : 0;
+ 
+-        return { shardId, shard, currentLevel, quantityNeeded, rankTime };
++        return { shardId, shard, ownedCount, quantityNeeded, rankTime };
+       })
+-      .filter((c): c is { shardId: string; shard: (typeof data.shards)[string]; currentLevel: number; quantityNeeded: number; rankTime: number } => c !== null)
++      .filter((c): c is { shardId: string; shard: (typeof data.shards)[string]; ownedCount: number; quantityNeeded: number; rankTime: number } => c !== null)
+       .sort((a, b) => b.rankTime - a.rankTime);
+ 
+     const shortestToMax: ShortestToMaxEntry[] = [];
+@@ -384,7 +388,8 @@ export class ShardOptimizationService {
+         shardId: candidate.shardId,
+         name: candidate.shard.name,
+         rarity: candidate.shard.rarity,
+-        currentLevel: candidate.currentLevel,
++        ownedCount: candidate.ownedCount,
++        maxCount: MAX_QUANTITIES[candidate.shard.rarity],
+         quantityNeeded: candidate.quantityNeeded,
+         blendedTime: list.blendedTotalTime,
+       });

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { Calculator, Settings, Shuffle, Share2, Menu, X, ExternalLink } from "lucide-react";
+import { Calculator, Settings, Shuffle, Share2, Menu, X, ExternalLink, Sparkles } from "lucide-react";
 
 const GitHubIcon: React.FC<{ className?: string }> = ({ className }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
@@ -48,6 +48,7 @@ export const Navigation: React.FC = () => {
 
   const navItems = [
     { path: "/", label: "Calculator", icon: Calculator, color: "purple" },
+    { path: "/optimizations", label: "Optimizations", icon: Sparkles, color: "fuchsia" },
     { path: "/recipes", label: "Recipes", icon: Shuffle, color: "green" },
     { path: "/shards", label: "Shards", icon: Settings, color: "blue" },
     { path: "/fusion-lines", label: "Fusion Lines", icon: Share2, color: "yellow" },
@@ -82,6 +83,13 @@ export const Navigation: React.FC = () => {
       border: "border border-blue-500/20",
       hoverBorder: "hover:border-blue-500/30",
     },
+    fuchsia: {
+      bg: "bg-fuchsia-500/20",
+      hoverBg: "hover:bg-fuchsia-500/30",
+      text: "text-fuchsia-300",
+      border: "border border-fuchsia-500/20",
+      hoverBorder: "hover:border-fuchsia-500/30",
+    },
   };
 
   return (
@@ -108,6 +116,8 @@ export const Navigation: React.FC = () => {
                   ? "ring-1 ring-offset-0 ring-green-300"
                   : color === "yellow"
                   ? "ring-1 ring-offset-0 ring-yellow-300"
+                  : color === "fuchsia"
+                  ? "ring-1 ring-offset-0 ring-fuchsia-300"
                   : "ring-1 ring-offset-0 ring-purple-300"
                 : "";
               return (
@@ -177,6 +187,8 @@ export const Navigation: React.FC = () => {
                     ? "ring-1 ring-offset-0 ring-green-300"
                     : color === "yellow"
                     ? "ring-1 ring-offset-0 ring-yellow-300"
+                    : color === "fuchsia"
+                    ? "ring-1 ring-offset-0 ring-fuchsia-300"
                     : "ring-1 ring-offset-0 ring-purple-300"
                   : "";
                 return (

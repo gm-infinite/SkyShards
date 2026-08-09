@@ -6,6 +6,7 @@ import { usePageTitle, useShardIconPreload } from "./hooks";
 import { ToastProvider } from "./components";
 
 const CalculatorPage = lazy(() => import("./pages/CalculatorPage").then((module) => ({ default: module.CalculatorPage })));
+const OptimizationsPage = lazy(() => import("./pages/OptimizationsPage").then((module) => ({ default: module.OptimizationsPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
 const RecipePage = lazy(() => import("./pages/RecipePage"));
 const FusionGraphPage = lazy(() => import("./pages/FusionGraphPage").then((module) => ({ default: module.FusionGraphPage })));
@@ -57,6 +58,14 @@ const router = createBrowserRouter(
           element: (
             <Suspense fallback={<LoadingSpinner />}>
               <CalculatorPage />
+            </Suspense>
+          ),
+        },
+        {
+          path: "optimizations",
+          element: (
+            <Suspense fallback={<LoadingSpinner />}>
+              <OptimizationsPage />
             </Suspense>
           ),
         },

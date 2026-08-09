@@ -1,0 +1,1028 @@
+diff --git a/src/App.tsx b/src/App.tsx
+index d827155..f29ed06 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -6,6 +6,7 @@ import { usePageTitle, useShardIconPreload } from "./hooks";
+ import { ToastProvider } from "./components";
+ 
+ const CalculatorPage = lazy(() => import("./pages/CalculatorPage").then((module) => ({ default: module.CalculatorPage })));
++const OptimizationsPage = lazy(() => import("./pages/OptimizationsPage").then((module) => ({ default: module.OptimizationsPage })));
+ const SettingsPage = lazy(() => import("./pages/SettingsPage").then((module) => ({ default: module.SettingsPage })));
+ const RecipePage = lazy(() => import("./pages/RecipePage"));
+ const FusionGraphPage = lazy(() => import("./pages/FusionGraphPage").then((module) => ({ default: module.FusionGraphPage })));
+@@ -60,6 +61,14 @@ const router = createBrowserRouter(
+             </Suspense>
+           ),
+         },
++        {
++          path: "optimizations",
++          element: (
++            <Suspense fallback={<LoadingSpinner />}>
++              <OptimizationsPage />
++            </Suspense>
++          ),
++        },
+         {
+           path: "shards",
+           element: (
+diff --git a/src/components/layout/Navigation.tsx b/src/components/layout/Navigation.tsx
+index 12c9206..f223dda 100644
+--- a/src/components/layout/Navigation.tsx
++++ b/src/components/layout/Navigation.tsx
+@@ -1,6 +1,6 @@
+ import React, { useState } from "react";
+ import { Link, useLocation } from "react-router-dom";
+-import { Calculator, Settings, Shuffle, Share2, Menu, X, ExternalLink } from "lucide-react";
++import { Calculator, Settings, Shuffle, Share2, Menu, X, ExternalLink, Sparkles } from "lucide-react";
+ 
+ const GitHubIcon: React.FC<{ className?: string }> = ({ className }) => (
+   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+@@ -48,6 +48,7 @@ export const Navigation: React.FC = () => {
+ 
+   const navItems = [
+     { path: "/", label: "Calculator", icon: Calculator, color: "purple" },
++    { path: "/optimizations", label: "Optimizations", icon: Sparkles, color: "fuchsia" },
+     { path: "/recipes", label: "Recipes", icon: Shuffle, color: "green" },
+     { path: "/shards", label: "Shards", icon: Settings, color: "blue" },
+     { path: "/fusion-lines", label: "Fusion Lines", icon: Share2, color: "yellow" },
+@@ -82,6 +83,13 @@ export const Navigation: React.FC = () => {
+       border: "border border-blue-500/20",
+       hoverBorder: "hover:border-blue-500/30",
+     },
++    fuchsia: {
++      bg: "bg-fuchsia-500/20",
++      hoverBg: "hover:bg-fuchsia-500/30",
++      text: "text-fuchsia-300",
++      border: "border border-fuchsia-500/20",
++      hoverBorder: "hover:border-fuchsia-500/30",
++    },
+   };
+ 
+   return (
+@@ -108,6 +116,8 @@ export const Navigation: React.FC = () => {
+                   ? "ring-1 ring-offset-0 ring-green-300"
+                   : color === "yellow"
+                   ? "ring-1 ring-offset-0 ring-yellow-300"
++                  : color === "fuchsia"
++                  ? "ring-1 ring-offset-0 ring-fuchsia-300"
+                   : "ring-1 ring-offset-0 ring-purple-300"
+                 : "";
+               return (
+@@ -177,6 +187,8 @@ export const Navigation: React.FC = () => {
+                     ? "ring-1 ring-offset-0 ring-green-300"
+                     : color === "yellow"
+                     ? "ring-1 ring-offset-0 ring-yellow-300"
++                    : color === "fuchsia"
++                    ? "ring-1 ring-offset-0 ring-fuchsia-300"
+                     : "ring-1 ring-offset-0 ring-purple-300"
+                   : "";
+                 return (
+diff --git a/src/components/results/ShardOptimizationsPanel.tsx b/src/components/results/ShardOptimizationsPanel.tsx
+new file mode 100644
+index 0000000..0dec93e
+--- /dev/null
++++ b/src/components/results/ShardOptimizationsPanel.tsx
+@@ -0,0 +1,269 @@
++import React, { useEffect, useState } from "react";
++import { Crosshair, Sparkles, Timer, Loader2, ListChecks, RefreshCw, PackageOpen } from "lucide-react";
++import { formatTime, getRarityColor } from "../../utilities";
++import { ShardOptimizationService } from "../../services";
++import type { GlobalOptimizationResult, ScanProgress } from "../../services";
++import type { CalculationParams, RecipeOverride } from "../../types/types";
++
++interface ShardOptimizationsPanelProps {
++  params: CalculationParams;
++  inventory: Map<string, number>;
++  ownedAttributes: Map<string, number>;
++  recipeOverrides: RecipeOverride[];
++}
++
++type TabKey = "shopping" | "trap" | "chameleon" | "shortest" | "excess";
++
++const TABS: { key: TabKey; label: string; icon: React.ElementType }[] = [
++  { key: "shopping", label: "Min / Max List", icon: ListChecks },
++  { key: "trap", label: "Trap Priority", icon: Crosshair },
++  { key: "chameleon", label: "Chameleon Priority", icon: Sparkles },
++  { key: "shortest", label: "Shortest to Max", icon: Timer },
++  { key: "excess", label: "Excess Inventory", icon: PackageOpen },
++];
++
++const ShardIcon: React.FC<{ shardId: string; name: string }> = ({ shardId, name }) => (
++  <img
++    src={`${import.meta.env.BASE_URL}shardIcons/${shardId}.png`}
++    alt={name}
++    className="w-5 h-5 object-contain flex-shrink-0 inline-block align-middle mr-2"
++    loading="lazy"
++  />
++);
++
++export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = ({ params, inventory, ownedAttributes, recipeOverrides }) => {
++  const shardOptimizationService = ShardOptimizationService.getInstance();
++  const [activeTab, setActiveTab] = useState<TabKey>("shopping");
++  const [result, setResult] = useState<GlobalOptimizationResult | null>(null);
++  const [progress, setProgress] = useState<ScanProgress | null>(null);
++  const [loading, setLoading] = useState(false);
++  const [refreshToken, setRefreshToken] = useState(0);
++
++  useEffect(() => {
++    let cancelled = false;
++    setLoading(true);
++    setProgress(null);
++    shardOptimizationService
++      .computeGlobalOptimizations(params, inventory, ownedAttributes, recipeOverrides, (p) => !cancelled && setProgress(p))
++      .then((res) => !cancelled && setResult(res))
++      .catch((err) => console.error("Global optimization scan failed:", err))
++      .finally(() => !cancelled && setLoading(false));
++    return () => {
++      cancelled = true;
++    };
++    // refreshToken lets the "Rescan" button force a recompute even if inputs are unchanged
++  }, [params, inventory, ownedAttributes, recipeOverrides, refreshToken, shardOptimizationService]);
++
++  const handleRescan = () => {
++    shardOptimizationService.invalidateGlobalCache();
++    setRefreshToken((t) => t + 1);
++  };
++
++  return (
++    <div className="bg-slate-800 border border-slate-600 rounded-md p-3">
++      <div className="flex items-center justify-between gap-2 mb-3">
++        <div className="flex items-center gap-2">
++          <div className="p-1 bg-slate-700 rounded-md">
++            <Sparkles className="w-5 h-5 text-fuchsia-400" />
++          </div>
++          <h3 className="text-lg font-semibold text-white">Grind Optimizations</h3>
++        </div>
++        <button
++          onClick={handleRescan}
++          disabled={loading}
++          className="px-2 py-1 text-xs rounded-md border border-slate-600 text-slate-300 hover:border-slate-500 flex items-center gap-1 flex-shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
++          title="Recompute from scratch (results are otherwise cached until your inventory, attributes, or settings change)"
++        >
++          <RefreshCw className={`w-3 h-3 ${loading ? "animate-spin" : ""}`} />
++          Rescan
++        </button>
++      </div>
++
++      <p className="text-xs text-slate-400 mb-3">
++        Automatically scans every shard attribute you haven't maxed yet — no target selection needed. Results are cached
++        until your inventory, attribute levels, or calculator settings change.
++      </p>
++
++      {loading && (
++        <div className="flex items-center gap-2 text-slate-400 text-sm py-3">
++          <Loader2 className="w-4 h-4 animate-spin" />
++          {progress ? `Scanning shards (${progress.completed}/${progress.total})...` : "Scanning shards..."}
++        </div>
++      )}
++
++      {!loading && result && result.candidateCount === 0 && (
++        <div className="text-slate-400 text-sm py-3">
++          Every shard in your imported attributes is already maxed — nothing left to optimize! Import your inventory/attributes if
++          this looks wrong.
++        </div>
++      )}
++
++      {!loading && result && result.candidateCount > 0 && (
++        <>
++          <div className="flex gap-2 flex-wrap mb-3">
++            {TABS.map(({ key, label, icon: Icon }) => (
++              <button
++                key={key}
++                onClick={() => setActiveTab(key)}
++                className={`px-3 py-1.5 font-medium rounded-md text-xs transition-colors duration-200 flex items-center gap-1.5 cursor-pointer border ${
++                  activeTab === key
++                    ? "bg-fuchsia-500/20 text-fuchsia-300 border-fuchsia-500/30"
++                    : "bg-slate-700/50 text-slate-300 border-slate-600 hover:border-slate-500"
++                }`}
++              >
++                <Icon className="w-3.5 h-3.5" />
++                {label}
++              </button>
++            ))}
++          </div>
++
++          <div className="text-xs text-slate-400 mb-2">
++            {result.candidateCount} unmaxed shards scanned • blended total time:{" "}
++            <span className="text-white font-medium">{formatTime(result.combinedBlendedTotalTime)}</span>
++          </div>
++
++          {activeTab === "shopping" && (
++            <div className="space-y-2">
++              <p className="text-xs text-slate-400">
++                Every shard you still need to farm directly to max every attribute, combined across all of them — in both
++                extremes: <span className="text-white">min</span> assumes every Crocodile fuse doubles, <span className="text-white">max</span>{" "}
++                assumes none do.
++              </p>
++              {result.shoppingRows.length === 0 ? (
++                <EmptyRow text="Nothing left to farm — your inventory covers everything." />
++              ) : (
++                <div className="overflow-x-auto">
++                  <table className="w-full text-sm">
++                    <thead>
++                      <tr className="text-slate-400 text-xs text-left">
++                        <th className="font-medium pb-1.5 pl-1">Shard</th>
++                        <th className="font-medium pb-1.5 text-right">Min Qty</th>
++                        <th className="font-medium pb-1.5 text-right">Max Qty</th>
++                        <th className="font-medium pb-1.5 text-right pr-1">Min → Max Time</th>
++                      </tr>
++                    </thead>
++                    <tbody>
++                      {result.shoppingRows.map((row) => (
++                        <tr key={row.shardId} className="border-t border-slate-700/60">
++                          <td className="py-1.5 pl-1">
++                            <div className="flex items-center min-w-0">
++                              <ShardIcon shardId={row.shardId} name={row.name} />
++                              <span className="text-white truncate">{row.name}</span>
++                            </div>
++                          </td>
++                          <td className="py-1.5 text-right text-slate-300">{Math.ceil(row.minQuantity)}x</td>
++                          <td className="py-1.5 text-right text-slate-300">{Math.ceil(row.maxQuantity)}x</td>
++                          <td className="py-1.5 text-right pr-1 text-fuchsia-300 font-medium whitespace-nowrap">
++                            {formatTime(row.minTime)} → {formatTime(row.maxTime)}
++                          </td>
++                        </tr>
++                      ))}
++                    </tbody>
++                  </table>
++                </div>
++              )}
++            </div>
++          )}
++
++          {activeTab === "trap" && (
++            <PriorityList
++              description="Top 10 shards across your whole remaining grind that can be passively farmed with Huntraps, ranked by total gather time — the ones most worth leaving a trap running for."
++              entries={result.trapPriority}
++              emptyText="No trappable shards show up in your combined shopping list."
++            />
++          )}
++
++          {activeTab === "chameleon" && (
++            <PriorityList
++              description="Top 10 shards across your whole remaining grind that can be obtained via a Chameleon Shard fusion, ranked by total gather time — the ones most worth spending a chameleon on."
++              entries={result.chameleonPriority}
++              emptyText="No shard in your combined shopping list has a chameleon fusion recipe."
++            />
++          )}
++
++          {activeTab === "shortest" && (
++            <div className="space-y-2">
++              <p className="text-xs text-slate-400">
++                Every unmaxed attribute, fastest to max first — blended min/max time using your own recipe/inventory setup.
++              </p>
++              <ol className="space-y-1.5">
++                {result.shortestToMax.map((entry, i) => (
++                  <li key={entry.shardId} className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between">
++                    <div className="flex items-center min-w-0">
++                      <span className="text-slate-500 text-xs w-5 flex-shrink-0">{i + 1}.</span>
++                      <ShardIcon shardId={entry.shardId} name={entry.name} />
++                      <div className="min-w-0">
++                        <span className={`text-sm truncate block ${getRarityColor(entry.rarity)}`}>{entry.name}</span>
++                        <span className="text-slate-500 text-xs">
++                          Level {entry.currentLevel} → 10 • {entry.quantityNeeded} shards
++                        </span>
++                      </div>
++                    </div>
++                    <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">{formatTime(entry.blendedTime)}</span>
++                  </li>
++                ))}
++              </ol>
++            </div>
++          )}
++
++          {activeTab === "excess" && (
++            <div className="space-y-2">
++              <p className="text-xs text-slate-400">
++                Shards left over after every unmaxed attribute has claimed what it needs — processed longest-to-get first, so
++                the biggest grinds get first pick of your stockpile and whatever's shown here genuinely isn't needed by
++                anything on your plate right now.
++              </p>
++              {result.excessInventory.length === 0 ? (
++                <EmptyRow text="Nothing left over — your inventory is fully spoken for by your remaining grind." />
++              ) : (
++                <ol className="space-y-1.5">
++                  {result.excessInventory.map((entry) => (
++                    <li
++                      key={entry.shardId}
++                      className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
++                    >
++                      <div className="flex items-center min-w-0">
++                        <ShardIcon shardId={entry.shardId} name={entry.name} />
++                        <span className="text-white text-sm truncate">{entry.name}</span>
++                      </div>
++                      <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">{Math.floor(entry.quantity)}x unused</span>
++                    </li>
++                  ))}
++                </ol>
++              )}
++            </div>
++          )}
++        </>
++      )}
++    </div>
++  );
++};
++
++const PriorityList: React.FC<{
++  description: string;
++  entries: { shardId: string; name: string; quantity: number; totalGatherTime: number }[];
++  emptyText: string;
++}> = ({ description, entries, emptyText }) => (
++  <div className="space-y-2">
++    <p className="text-xs text-slate-400">{description}</p>
++    {entries.length === 0 ? (
++      <EmptyRow text={emptyText} />
++    ) : (
++      <ol className="space-y-1.5">
++        {entries.map((entry, i) => (
++          <li key={entry.shardId} className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between">
++            <div className="flex items-center min-w-0">
++              <span className="text-slate-500 text-xs w-5 flex-shrink-0">{i + 1}.</span>
++              <ShardIcon shardId={entry.shardId} name={entry.name} />
++              <span className="text-white text-sm truncate">{entry.name}</span>
++              <span className="text-slate-400 text-xs ml-2 flex-shrink-0">{Math.ceil(entry.quantity)}x needed</span>
++            </div>
++            <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">{formatTime(entry.totalGatherTime)}</span>
++          </li>
++        ))}
++      </ol>
++    )}
++  </div>
++);
++
++const EmptyRow: React.FC<{ text: string }> = ({ text }) => <div className="text-slate-400 text-sm py-2">{text}</div>;
+diff --git a/src/components/results/index.ts b/src/components/results/index.ts
+index 08060bb..fac53fd 100644
+--- a/src/components/results/index.ts
++++ b/src/components/results/index.ts
+@@ -1,3 +1,4 @@
+ export { CalculationResults } from "./CalculationResults";
+ export { InventoryCalculationResults } from "./InventoryCalculationResults";
+ export { ShardsUsed } from "./ShardsUsed";
++export { ShardOptimizationsPanel } from "./ShardOptimizationsPanel";
+diff --git a/src/data/attributeLevelingCosts.ts b/src/data/attributeLevelingCosts.ts
+new file mode 100644
+index 0000000..e877a3a
+--- /dev/null
++++ b/src/data/attributeLevelingCosts.ts
+@@ -0,0 +1,36 @@
++import type { Shard } from "../types/types";
++
++/**
++ * Cumulative number of Attribute Shards that must be syphoned to reach a given
++ * level (index 0 => level 1, index 9 => level 10 / max) for each rarity.
++ * Source: Hypixel Skyblock's attribute leveling table. Higher rarities need
++ * fewer shards to max.
++ */
++export const CUMULATIVE_SHARDS_BY_RARITY: Record<Shard["rarity"], number[]> = {
++  common: [1, 4, 9, 15, 22, 30, 40, 54, 72, 96],
++  uncommon: [1, 3, 6, 10, 15, 21, 28, 36, 48, 64],
++  rare: [1, 3, 6, 9, 13, 17, 22, 28, 36, 48],
++  epic: [1, 2, 4, 6, 9, 12, 16, 20, 25, 32],
++  legendary: [1, 2, 3, 5, 7, 9, 12, 15, 19, 24],
++};
++
++export const MAX_ATTRIBUTE_LEVEL = 10;
++
++/**
++ * Number of additional shards required to take an attribute of the given
++ * rarity from `currentLevel` (0 = not started) to max level (10).
++ * Returns 0 if already maxed.
++ */
++export function getShardsNeededToMax(rarity: Shard["rarity"], currentLevel: number): number {
++  const table = CUMULATIVE_SHARDS_BY_RARITY[rarity];
++  if (!table) return 0;
++
++  const maxCumulative = table[MAX_ATTRIBUTE_LEVEL - 1];
++  const clampedLevel = Math.max(0, Math.min(MAX_ATTRIBUTE_LEVEL, Math.floor(currentLevel)));
++
++  if (clampedLevel >= MAX_ATTRIBUTE_LEVEL) return 0;
++  if (clampedLevel <= 0) return maxCumulative;
++
++  const ownedCumulative = table[clampedLevel - 1];
++  return Math.max(0, maxCumulative - ownedCumulative);
++}
+diff --git a/src/data/trappableShardNames.ts b/src/data/trappableShardNames.ts
+new file mode 100644
+index 0000000..c5006df
+--- /dev/null
++++ b/src/data/trappableShardNames.ts
+@@ -0,0 +1,61 @@
++import type { Data } from "../types/types";
++
++/**
++ * Display names (as they appear in fusion-data.json's `shards[].name`) of
++ * shards that can be passively farmed with Huntraps, per the Hypixel Skyblock
++ * wiki / community trap-location data. Matched case-insensitively against
++ * shard.name so we don't depend on internal_id formatting.
++ *
++ * Note: "Burningsoul" is a trappable shard per the wiki but isn't present in
++ * this app's fusion-data.json yet (not added to the game data source) — it's
++ * listed here so it starts working automatically once the data file catches up.
++ */
++export const TRAPPABLE_SHARD_NAMES: string[] = [
++  "Phanpyre",
++  "Cod",
++  "Phanflare",
++  "Verdant",
++  "Chill",
++  "Birries",
++  "Tadgang",
++  "Coralot",
++  "Mudworm",
++  "Azure",
++  "Mossybit",
++  "Salmon",
++  "Bambuleaf",
++  "Ent",
++  "Soul of the Alpha",
++  "Mochibear",
++  "Magma Slug",
++  "Stridersurfer",
++  "Invisibug",
++  "Piranha",
++  "Drowned",
++  "Abyssal Lanternfish",
++  "Silentdepth",
++  "Thyst",
++  "Snowfin",
++  "Lumisquid",
++  "Dreadwing",
++  "Joydive",
++  "Lava Flame",
++  "Inferno Koi",
++  "Shellwise",
++  "XYZ",
++  "Spike",
++  "Burningsoul",
++];
++
++const trappableNameSet = new Set(TRAPPABLE_SHARD_NAMES.map((name) => name.toLowerCase()));
++
++/** Resolves the trappable-name list against a loaded Data set's shard IDs. */
++export function getTrappableShardIds(data: Data): Set<string> {
++  const ids = new Set<string>();
++  for (const [shardId, shard] of Object.entries(data.shards)) {
++    if (trappableNameSet.has(shard.name.toLowerCase())) {
++      ids.add(shardId);
++    }
++  }
++  return ids;
++}
+diff --git a/src/pages/OptimizationsPage.tsx b/src/pages/OptimizationsPage.tsx
+new file mode 100644
+index 0000000..5c93970
+--- /dev/null
++++ b/src/pages/OptimizationsPage.tsx
+@@ -0,0 +1,105 @@
++import React, { useState, useEffect, useCallback } from "react";
++import { Sparkles, Package } from "lucide-react";
++import { useCalculatorState, useCustomRates } from "../hooks";
++import { buildCalculationParams } from "../services";
++import { ShardOptimizationsPanel, InventoryManagementModal } from "../components";
++import { loadInventory, saveInventory, loadOwnedAttributes, saveOwnedAttributes, loadDisabledShards, saveDisabledShards } from "../utilities";
++import type { CalculationParams } from "../types/types";
++
++export const OptimizationsPage: React.FC = () => {
++  const { form, setForm } = useCalculatorState();
++  const { customRates } = useCustomRates();
++
++  const [inventory, setInventory] = useState<Map<string, number>>(loadInventory);
++  const [ownedAttributes, setOwnedAttributes] = useState<Map<string, number>>(loadOwnedAttributes);
++  const [disabledShards, setDisabledShards] = useState<Set<string>>(loadDisabledShards);
++  const [showInventoryModal, setShowInventoryModal] = useState(false);
++
++  const [params, setParams] = useState<CalculationParams | null>(null);
++
++  useEffect(() => {
++    saveInventory(inventory);
++  }, [inventory]);
++  useEffect(() => {
++    saveOwnedAttributes(ownedAttributes);
++  }, [ownedAttributes]);
++  useEffect(() => {
++    saveDisabledShards(disabledShards);
++  }, [disabledShards]);
++
++  // Build CalculationParams the same way the Calculator page does, from the same settings.
++  useEffect(() => {
++    let cancelled = false;
++    buildCalculationParams(form, customRates)
++      .then((nextParams) => !cancelled && setParams(nextParams))
++      .catch(console.error);
++    return () => {
++      cancelled = true;
++    };
++  }, [form, customRates]);
++
++  const effectiveInventory = React.useMemo(() => new Map([...inventory].filter(([id]) => !disabledShards.has(id))), [inventory, disabledShards]);
++
++  const handleShardLevelsImport = useCallback(
++    (levels: Partial<Pick<typeof form, "newtLevel" | "salamanderLevel" | "lizardKingLevel" | "leviathanLevel" | "pythonLevel" | "kingCobraLevel" | "seaSerpentLevel" | "tiamatLevel" | "crocodileLevel">>) => {
++      setForm({ ...form, ...levels });
++    },
++    [form, setForm]
++  );
++
++  return (
++    <div className="max-w-screen-2xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-4">
++      <div className="flex items-center justify-between flex-wrap gap-3">
++        <div>
++          <h1 className="text-2xl font-bold text-white flex items-center gap-2">
++            <Sparkles className="w-6 h-6 text-fuchsia-400" />
++            Grind Optimizations
++          </h1>
++          <p className="text-slate-400 text-sm mt-1">
++            Automatically scans every unmaxed attribute in your imported inventory — trap priority, chameleon priority, and shortest-to-max.
++          </p>
++        </div>
++        <button
++          onClick={() => setShowInventoryModal(true)}
++          className="px-3 py-2 font-medium rounded-md text-sm transition-colors duration-200 flex items-center gap-2 cursor-pointer bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/20 hover:border-emerald-500/30"
++        >
++          <Package className="w-4 h-4" />
++          Manage Inventory
++          {inventory.size > 0 && <span className="text-emerald-200/70">({inventory.size})</span>}
++        </button>
++      </div>
++
++      {inventory.size === 0 ? (
++        <div className="text-center py-10 bg-white/5 border border-white/10 rounded-md">
++          <div className="max-w-md mx-auto space-y-3">
++            <div className="w-12 h-12 bg-fuchsia-500/20 border border-fuchsia-500/20 rounded-md flex items-center justify-center mx-auto">
++              <Package className="w-6 h-6 text-fuchsia-400" />
++            </div>
++            <h3 className="text-lg font-medium text-white">Import your inventory to get started</h3>
++            <p className="text-slate-400 text-sm mt-1">These tools need your owned shards and attribute levels to compute anything useful.</p>
++            <button
++              onClick={() => setShowInventoryModal(true)}
++              className="px-4 py-2 font-medium rounded-md text-sm bg-fuchsia-500/20 hover:bg-fuchsia-500/30 text-fuchsia-300 border border-fuchsia-500/20 hover:border-fuchsia-500/30 cursor-pointer"
++            >
++              Manage Inventory
++            </button>
++          </div>
++        </div>
++      ) : (
++        params && <ShardOptimizationsPanel params={params} inventory={effectiveInventory} ownedAttributes={ownedAttributes} recipeOverrides={[]} />
++      )}
++
++      <InventoryManagementModal
++        open={showInventoryModal}
++        onClose={() => setShowInventoryModal(false)}
++        inventory={inventory}
++        ownedAttributes={ownedAttributes}
++        onInventoryChange={setInventory}
++        onOwnedAttributesChange={setOwnedAttributes}
++        disabledShards={disabledShards}
++        onDisabledShardsChange={setDisabledShards}
++        onShardLevelsImport={handleShardLevelsImport}
++      />
++    </div>
++  );
++};
+diff --git a/src/services/index.ts b/src/services/index.ts
+index cb8de1d..9411011 100644
+--- a/src/services/index.ts
++++ b/src/services/index.ts
+@@ -1,6 +1,16 @@
+ export { CalculationService } from "./calculationService";
+ export { buildCalculationParams } from "./calculationParams";
+ export { InvCalculationService } from "./invCalculationService";
++export { ShardOptimizationService } from "./shardOptimizationService";
++export type {
++  MinMaxShoppingList,
++  ShardTimeEntry,
++  ShortestToMaxEntry,
++  ShoppingListRow,
++  GlobalOptimizationResult,
++  ScanProgress,
++  ExcessInventoryEntry,
++} from "./shardOptimizationService";
+ export * from "./dataService";
+ export { hypixelService } from "./hypixelService";
+ export type {
+diff --git a/src/services/invCalculationService.ts b/src/services/invCalculationService.ts
+index 8512915..3aaa852 100644
+--- a/src/services/invCalculationService.ts
++++ b/src/services/invCalculationService.ts
+@@ -21,6 +21,9 @@ type InventoryRecipeNode = Extract<
+ // the shard's real minCost so cheaper freely-usable shards are consumed first.
+ const FREELY_USABLE_RESIDUAL = 0.02;
+ 
++const FORCE_CROCODILE_SUCCESS_LEVEL = 50; // -> crocodileMultiplier = 2 ("every reptile fuse doubles")
++const FORCE_CROCODILE_FAIL_LEVEL = 0; // -> crocodileMultiplier = 1 ("no reptile fuse doubles")
++
+ export class InvCalculationService {
+   private static instance: InvCalculationService;
+   // Share the singleton: a private instance would keep its own dataCache and
+@@ -34,6 +37,46 @@ export class InvCalculationService {
+     return InvCalculationService.instance;
+   }
+ 
++  /**
++   * Given a tree that's already been built (recipe choices AND
++   * inventory/craft/farm decisions all fixed by a single real calculation),
++   * replays quantities through that *same* structure assuming every eligible
++   * Crocodile fuse always doubles ("min") or never doubles ("max"). This
++   * does NOT re-run recipe/inventory selection — it's the same plan, scored
++   * under its best-case and worst-case luck, matching how the Calculator tab
++   * itself models Crocodile (expected value of one fixed plan), just pushed
++   * to the two extremes instead of blended per-fuse.
++   */
++  computeMinMaxFromTree(
++    tree: InventoryRecipeTree,
++    requiredQuantity: number,
++    parsed: Data,
++    params: CalculationParams
++  ): {
++    min: { totalQuantities: Map<string, number>; totalTime: number };
++    max: { totalQuantities: Map<string, number>; totalTime: number };
++  } {
++    const minTree = structuredClone(tree);
++    const maxTree = structuredClone(tree);
++
++    const minParams: CalculationParams = { ...params, crocodileLevel: FORCE_CROCODILE_SUCCESS_LEVEL };
++    const maxParams: CalculationParams = { ...params, crocodileLevel: FORCE_CROCODILE_FAIL_LEVEL };
++
++    this.recalculateTreeQuantities(minTree, requiredQuantity, parsed, minParams);
++    this.recalculateTreeQuantities(maxTree, requiredQuantity, parsed, maxParams);
++
++    const minStats = this.service.collectTreeStats(minTree, minParams);
++    const maxStats = this.service.collectTreeStats(maxTree, maxParams);
++
++    const minTotalTime = this.service.calculateTotalTimeFromQuantities(minStats.totalQuantities, minStats.craftTime, parsed, minParams);
++    const maxTotalTime = this.service.calculateTotalTimeFromQuantities(maxStats.totalQuantities, maxStats.craftTime, parsed, maxParams);
++
++    return {
++      min: { totalQuantities: minStats.totalQuantities, totalTime: minTotalTime },
++      max: { totalQuantities: maxStats.totalQuantities, totalTime: maxTotalTime },
++    };
++  }
++
+   // Updates quantity and derived fields for a tree node.
+   private recalculateTreeQuantities(
+     tree: InventoryRecipeTree,
+diff --git a/src/services/shardOptimizationService.ts b/src/services/shardOptimizationService.ts
+new file mode 100644
+index 0000000..020dcff
+--- /dev/null
++++ b/src/services/shardOptimizationService.ts
+@@ -0,0 +1,357 @@
++import { CalculationService } from "./calculationService";
++import { InvCalculationService } from "./invCalculationService";
++import { getShardsNeededToMax } from "../data/attributeLevelingCosts";
++import { getTrappableShardIds } from "../data/trappableShardNames";
++import type { CalculationParams, Data, RecipeOverride } from "../types/types";
++
++const CHAMELEON_SHARD_ID = "L4";
++
++/** Just the two numbers every downstream consumer here actually needs from a scenario. */
++export interface ShoppingListScenario {
++  totalQuantities: Map<string, number>;
++  totalTime: number;
++}
++
++export interface MinMaxShoppingList {
++  /** Best case: the one real chosen plan, but every eligible Crocodile fuse in it doubles. */
++  min: ShoppingListScenario;
++  /** Worst case: the same real chosen plan, but no Crocodile fuse in it doubles. */
++  max: ShoppingListScenario;
++  /** (2 * crocodileLevel)% weight on `min`, the rest on `max`. */
++  blendedTotalTime: number;
++  blendedTimePerShard: number;
++  /** Weight (0-1) given to the min scenario, i.e. crocodileLevel's success chance. */
++  successWeight: number;
++  /** Inventory left over after the real plan claimed what it needed from the pool it was given. */
++  remainingInventory?: Map<string, number>;
++}
++
++export interface ShardTimeEntry {
++  shardId: string;
++  name: string;
++  /** Quantity of this shard the combined min-case shopping list still needs to farm directly. */
++  quantity: number;
++  /** Total time (hours) to farm that quantity at this shard's own rate. */
++  totalGatherTime: number;
++}
++
++export interface ShortestToMaxEntry {
++  shardId: string;
++  name: string;
++  rarity: string;
++  currentLevel: number;
++  quantityNeeded: number;
++  /** Blended (min/max crocodile) total time to acquire quantityNeeded of this shard. */
++  blendedTime: number;
++}
++
++export interface ShoppingListRow {
++  shardId: string;
++  name: string;
++  minQuantity: number;
++  maxQuantity: number;
++  minTime: number;
++  maxTime: number;
++}
++
++export interface ExcessInventoryEntry {
++  shardId: string;
++  name: string;
++  quantity: number;
++}
++
++export interface GlobalOptimizationResult {
++  /** Every unmaxed shard, fastest to max first. */
++  shortestToMax: ShortestToMaxEntry[];
++  /** Farm shopping list across ALL unmaxed shards combined, min & max scenarios merged. */
++  shoppingRows: ShoppingListRow[];
++  /** Trappable shards from the combined shopping list, ranked by total gather time. */
++  trapPriority: ShardTimeEntry[];
++  /** Chameleon-fusable shards from the combined shopping list, ranked by total gather time. */
++  chameleonPriority: ShardTimeEntry[];
++  /** Sum of every candidate's blended total time (rough "everything left" estimate). */
++  combinedBlendedTotalTime: number;
++  candidateCount: number;
++  /** What's left in your inventory after every unmaxed attribute has claimed what it needs, largest first. */
++  excessInventory: ExcessInventoryEntry[];
++}
++
++export interface ScanProgress {
++  completed: number;
++  total: number;
++}
++
++function serializeMap(map: Map<string, number>): string {
++  return Array.from(map.entries())
++    .sort(([a], [b]) => a.localeCompare(b))
++    .map(([k, v]) => `${k}:${v}`)
++    .join(",");
++}
++
++export class ShardOptimizationService {
++  private static instance: ShardOptimizationService;
++  private calc = new CalculationService();
++  private inv = InvCalculationService.getInstance();
++  private globalCache: { key: string; promise: Promise<GlobalOptimizationResult> } | null = null;
++
++  public static getInstance(): ShardOptimizationService {
++    if (!ShardOptimizationService.instance) {
++      ShardOptimizationService.instance = new ShardOptimizationService();
++    }
++    return ShardOptimizationService.instance;
++  }
++
++  /**
++   * Runs the calculation ONCE with the player's real crocodileLevel — exactly
++   * like the Calculator tab, which picks recipes/inventory usage based on the
++   * real expected-value multiplier — then replays that *same* chosen plan
++   * under its best-case (every eligible fuse doubles) and worst-case (none
++   * do) outcomes, and blends the two totals by the real success chance.
++   * This never re-optimizes into a different plan for min vs max; both are
++   * the same recipe/inventory choices, just different luck.
++   *
++   * `inventory` is whatever pool this call is allowed to draw from — for a
++   * single standalone lookup that's the player's full inventory, but callers
++   * doing a multi-shard greedy scan can pass in a pool that's already been
++   * partly spent by higher-priority shards. `remainingInventory` on the
++   * result reports what's left after this call, to feed the next one.
++   */
++  async computeMinMaxShoppingList(
++    targetShard: string,
++    requiredQuantity: number,
++    params: CalculationParams,
++    inventory: Map<string, number>,
++    recipeOverrides: RecipeOverride[] = [],
++    ownedAttributes: Map<string, number> = new Map()
++  ): Promise<MinMaxShoppingList> {
++    const successWeight = Math.max(0, Math.min(100, 2 * params.crocodileLevel)) / 100;
++
++    const real = await this.inv.calculateOptimalPath(targetShard, requiredQuantity, params, inventory, recipeOverrides, ownedAttributes);
++
++    if (!real.tree) {
++      const scenario: ShoppingListScenario = { totalQuantities: real.totalQuantities, totalTime: real.totalTime };
++      return {
++        min: scenario,
++        max: scenario,
++        blendedTotalTime: real.totalTime,
++        blendedTimePerShard: 0,
++        successWeight,
++        remainingInventory: real.remainingInventory,
++      };
++    }
++
++    const parsed = await this.calc.parseData(params);
++    const { min, max } = this.inv.computeMinMaxFromTree(real.tree, requiredQuantity, parsed, params);
++
++    const blendedTotalTime = successWeight * min.totalTime + (1 - successWeight) * max.totalTime;
++    const blendedTimePerShard = requiredQuantity > 0 ? blendedTotalTime / requiredQuantity : 0;
++
++    return { min, max, blendedTotalTime, blendedTimePerShard, successWeight, remainingInventory: real.remainingInventory };
++  }
++
++  /** Flattens combined min/max total-quantity maps into rows the UI can render directly. */
++  computeShoppingListRows(minQuantities: Map<string, number>, maxQuantities: Map<string, number>, data: Data): ShoppingListRow[] {
++    const shardIds = new Set<string>([...minQuantities.keys(), ...maxQuantities.keys()]);
++    const rows: ShoppingListRow[] = [];
++
++    for (const shardId of shardIds) {
++      const shard = data.shards[shardId];
++      if (!shard) continue;
++
++      const unitTime = this.calc.getDirectCost(shard, false);
++      if (!Number.isFinite(unitTime)) continue;
++
++      const minQuantity = minQuantities.get(shardId) ?? 0;
++      const maxQuantity = maxQuantities.get(shardId) ?? 0;
++
++      rows.push({
++        shardId,
++        name: shard.name,
++        minQuantity,
++        maxQuantity,
++        minTime: unitTime * minQuantity,
++        maxTime: unitTime * maxQuantity,
++      });
++    }
++
++    return rows.sort((a, b) => b.maxTime - a.maxTime);
++  }
++
++  /**
++   * Ranks shards from a combined min-case shopping list by their own total
++   * gather time (quantity needed x that shard's own farm rate), restricted
++   * to shards matching `filter`. Shared implementation for both Trap
++   * Priority (filter = trappable) and Chameleon Priority (filter =
++   * chameleon-fusable): both boil down to "which shard costs the most time
++   * to gather normally, among the ones this shortcut actually applies to."
++   */
++  private rankByGatherTime(minQuantities: Map<string, number>, data: Data, filter: (shardId: string) => boolean, limit: number): ShardTimeEntry[] {
++    const entries: ShardTimeEntry[] = [];
++
++    for (const [shardId, quantity] of minQuantities.entries()) {
++      if (!filter(shardId)) continue;
++      const shard = data.shards[shardId];
++      if (!shard) continue;
++
++      const unitTime = this.calc.getDirectCost(shard, false);
++      if (!Number.isFinite(unitTime)) continue;
++
++      entries.push({ shardId, name: shard.name, quantity, totalGatherTime: unitTime * quantity });
++    }
++
++    return entries.sort((a, b) => b.totalGatherTime - a.totalGatherTime).slice(0, limit);
++  }
++
++  /** Top trappable shards (by total gather time) from a combined min-case shopping list. */
++  computeTrapPriorityList(minQuantities: Map<string, number>, data: Data, limit = 10): ShardTimeEntry[] {
++    const trappableIds = getTrappableShardIds(data);
++    return this.rankByGatherTime(minQuantities, data, (id) => trappableIds.has(id), limit);
++  }
++
++  /** Top chameleon-fusable shards (by total gather time) from a combined min-case shopping list. */
++  computeChameleonPriorityList(minQuantities: Map<string, number>, data: Data, limit = 10): ShardTimeEntry[] {
++    const hasChameleonRecipe = (shardId: string) => (data.recipes[shardId] || []).some((r) => r.inputs.includes(CHAMELEON_SHARD_ID));
++    return this.rankByGatherTime(minQuantities, data, hasChameleonRecipe, limit);
++  }
++
++  /**
++   * The main entry point: automatically scans every shard the player hasn't
++   * maxed yet (no target shard needed), and returns the shortest-to-max
++   * ranking plus a combined min/max shopping list, trap priority, and
++   * chameleon priority across all of them at once.
++   *
++   * Results are cached and reused as long as params/inventory/attributes/
++   * recipeOverrides haven't changed, since a full scan runs up to two
++   * optimal-path calculations per unmaxed shard. `onProgress` is called
++   * after each batch so the UI can show scan progress.
++   */
++  async computeGlobalOptimizations(
++    params: CalculationParams,
++    inventory: Map<string, number>,
++    ownedAttributes: Map<string, number>,
++    recipeOverrides: RecipeOverride[] = [],
++    onProgress?: (progress: ScanProgress) => void
++  ): Promise<GlobalOptimizationResult> {
++    const cacheKey = JSON.stringify({
++      params,
++      inventory: serializeMap(inventory),
++      ownedAttributes: serializeMap(ownedAttributes),
++      recipeOverrides,
++    });
++
++    if (this.globalCache && this.globalCache.key === cacheKey) {
++      return this.globalCache.promise;
++    }
++
++    const promise = this.computeGlobalOptimizationsUncached(params, inventory, ownedAttributes, recipeOverrides, onProgress);
++    this.globalCache = { key: cacheKey, promise };
++    return promise;
++  }
++
++  /** Drops the cached result so the next computeGlobalOptimizations call recomputes from scratch. */
++  invalidateGlobalCache(): void {
++    this.globalCache = null;
++  }
++
++  private async computeGlobalOptimizationsUncached(
++    params: CalculationParams,
++    inventory: Map<string, number>,
++    ownedAttributes: Map<string, number>,
++    recipeOverrides: RecipeOverride[],
++    onProgress?: (progress: ScanProgress) => void
++  ): Promise<GlobalOptimizationResult> {
++    const data = await this.calc.parseData(params);
++
++    // Cheap ranking pass: "longest to get" approximated by raw farm time
++    // (quantity needed x that shard's own direct rate), just to decide
++    // processing order below — no calculateOptimalPath needed yet.
++    const ranked = Object.keys(data.shards)
++      .map((shardId) => {
++        const shard = data.shards[shardId];
++        const currentLevel = ownedAttributes.get(shardId) ?? 0;
++        if (currentLevel >= 10) return null;
++
++        const quantityNeeded = getShardsNeededToMax(shard.rarity, currentLevel);
++        if (quantityNeeded <= 0) return null;
++
++        const unitTime = this.calc.getDirectCost(shard, false);
++        const rankTime = Number.isFinite(unitTime) ? unitTime * quantityNeeded : 0;
++
++        return { shardId, shard, currentLevel, quantityNeeded, rankTime };
++      })
++      .filter((c): c is { shardId: string; shard: (typeof data.shards)[string]; currentLevel: number; quantityNeeded: number; rankTime: number } => c !== null)
++      .sort((a, b) => b.rankTime - a.rankTime);
++
++    const shortestToMax: ShortestToMaxEntry[] = [];
++    const combinedMinQuantities = new Map<string, number>();
++    const combinedMaxQuantities = new Map<string, number>();
++    let combinedBlendedTotalTime = 0;
++
++    // Greedy, longest-to-get first, ONE shared inventory pool that depletes
++    // as we go: each candidate is calculated against whatever's left after
++    // every higher-priority (longer) candidate already claimed its share, so
++    // scarce inventory gets spent where it saves the most time instead of
++    // every target independently assuming it has the full stockpile to
++    // itself. This must run sequentially — each step depends on the last.
++    let sharedInventory = new Map(inventory);
++
++    for (let i = 0; i < ranked.length; i++) {
++      const candidate = ranked[i];
++
++      const list = await this.computeMinMaxShoppingList(
++        candidate.shardId,
++        candidate.quantityNeeded,
++        params,
++        sharedInventory,
++        recipeOverrides,
++        ownedAttributes
++      );
++
++      shortestToMax.push({
++        shardId: candidate.shardId,
++        name: candidate.shard.name,
++        rarity: candidate.shard.rarity,
++        currentLevel: candidate.currentLevel,
++        quantityNeeded: candidate.quantityNeeded,
++        blendedTime: list.blendedTotalTime,
++      });
++      combinedBlendedTotalTime += list.blendedTotalTime;
++
++      for (const [id, qty] of list.min.totalQuantities.entries()) {
++        combinedMinQuantities.set(id, (combinedMinQuantities.get(id) || 0) + qty);
++      }
++      for (const [id, qty] of list.max.totalQuantities.entries()) {
++        combinedMaxQuantities.set(id, (combinedMaxQuantities.get(id) || 0) + qty);
++      }
++
++      if (list.remainingInventory) {
++        sharedInventory = list.remainingInventory;
++      }
++
++      onProgress?.({ completed: i + 1, total: ranked.length });
++    }
++
++    shortestToMax.sort((a, b) => a.blendedTime - b.blendedTime);
++
++    const shoppingRows = this.computeShoppingListRows(combinedMinQuantities, combinedMaxQuantities, data);
++    const trapPriority = this.computeTrapPriorityList(combinedMinQuantities, data, 10);
++    const chameleonPriority = this.computeChameleonPriorityList(combinedMinQuantities, data, 10);
++
++    // Whatever's left in the shared pool after every unmaxed attribute has
++    // claimed what it needs — genuinely idle stock the plan never touched.
++    const excessInventory: ExcessInventoryEntry[] = Array.from(sharedInventory.entries())
++      .filter(([, qty]) => qty > 0)
++      .map(([shardId, quantity]) => ({ shardId, name: data.shards[shardId]?.name ?? shardId, quantity }))
++      .sort((a, b) => b.quantity - a.quantity);
++
++    return {
++      shortestToMax,
++      shoppingRows,
++      trapPriority,
++      chameleonPriority,
++      combinedBlendedTotalTime,
++      candidateCount: ranked.length,
++      excessInventory,
++    };
++  }
++}
