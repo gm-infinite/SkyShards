@@ -11,6 +11,8 @@ export type {
   GlobalOptimizationResult,
   ScanProgress,
   ExcessInventoryEntry,
+  SubstitutionUsageEntry,
+  ExcessSubstitutionSuggestion,
 } from "./shardOptimizationService";
 export * from "./dataService";
 export { hypixelService } from "./hypixelService";

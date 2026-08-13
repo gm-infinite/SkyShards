@@ -13,6 +13,17 @@ export interface ShoppingListScenario {
   totalTime: number;
 }
 
+export interface SubstitutionUsageEntry {
+  substituteShardId: string;
+  substituteName: string;
+  /** The recipe/output this substitution actually fed into. */
+  usedInShardId: string;
+  usedInName: string;
+  quantity: number;
+  /** Rough value: quantity x the substitute's own gather rate — what farming this would have cost. */
+  timeValue: number;
+}
+
 export interface MinMaxShoppingList {
   /** Best case: the one real chosen plan, but every eligible Crocodile fuse in it doubles. */
   min: ShoppingListScenario;
@@ -25,8 +36,13 @@ export interface MinMaxShoppingList {
   successWeight: number;
   /** Inventory left over after the real plan claimed what it needed from the pool it was given. */
   remainingInventory?: Map<string, number>;
-  /** How much of each shard the real plan drew from stock (method "inventory" nodes) instead of farming/crafting fresh — luck-independent, same for min and max since both replay the same tree. */
-  inventoryUsage: Map<string, number>;
+  /**
+   * Every point in the real plan's tree where stock was drawn instead of
+   * farming, kept separate per (substitute shard, recipe it fed) pair — so
+   * the same shard substituting into two different recipes shows as two
+   * entries, not one merged number.
+   */
+  substitutionUsage: SubstitutionUsageEntry[];
 }
 
 export interface ShardTimeEntry {
@@ -60,6 +76,8 @@ export interface ShortestToMaxEntry {
   quantityNeeded: number;
   /** Blended (min/max crocodile) total time to acquire quantityNeeded of this shard. */
   blendedTime: number;
+  /** Total units drawn from stock anywhere in this shard's own plan — a quick "uses N from stock" indicator. */
+  substitutedCount: number;
 }
 
 export interface ShoppingListRow {
@@ -79,6 +97,21 @@ export interface ExcessInventoryEntry {
   quantity: number;
 }
 
+export interface ExcessSubstitutionSuggestion {
+  excessShardId: string;
+  excessName: string;
+  /** How much of this excess shard is genuinely idle right now. */
+  excessAvailable: number;
+  targetShardId: string;
+  targetName: string;
+  /** The ingredient this substitution would let you stop farming. */
+  replacesShardId: string;
+  replacesName: string;
+  craftsUsable: number;
+  quantityOfTargetCovered: number;
+  timeSaved: number;
+}
+
 export interface GlobalOptimizationResult {
   /** Every unmaxed shard, fastest to max first. */
   shortestToMax: ShortestToMaxEntry[];
@@ -91,8 +124,12 @@ export interface GlobalOptimizationResult {
   /** Sum of every candidate's blended total time (rough "everything left" estimate). */
   combinedBlendedTotalTime: number;
   candidateCount: number;
-  /** What's left in your inventory after every unmaxed attribute has claimed what it needs, largest first. */
+  /** Every actual stock-substitution the real plan is using, ranked by value, kept separate per (substitute, recipe used in) pair. */
+  substitutionsUsed: SubstitutionUsageEntry[];
+  /** What's left in your inventory after every unmaxed attribute has claimed what it needs, largest first — genuinely idle. */
   excessInventory: ExcessInventoryEntry[];
+  /** Idle excess that ISN'T being used yet, but could be if you switched a recipe — not auto-applied, just surfaced. */
+  excessSubstitutionSuggestions: ExcessSubstitutionSuggestion[];
 }
 
 export interface ScanProgress {
@@ -146,7 +183,8 @@ export class ShardOptimizationService {
     const successWeight = Math.max(0, Math.min(100, 2 * params.crocodileLevel)) / 100;
 
     const real = await this.inv.calculateOptimalPath(targetShard, requiredQuantity, params, inventory, recipeOverrides, ownedAttributes);
-    const inventoryUsage = real.tree ? this.collectInventoryUsage(real.tree) : new Map<string, number>();
+    const parsed = await this.calc.parseData(params);
+    const substitutionUsage = real.tree ? this.collectSubstitutionUsage(real.tree, parsed) : [];
 
     if (!real.tree) {
       const scenario: ShoppingListScenario = { totalQuantities: real.totalQuantities, totalTime: real.totalTime };
@@ -157,40 +195,71 @@ export class ShardOptimizationService {
         blendedTimePerShard: 0,
         successWeight,
         remainingInventory: real.remainingInventory,
-        inventoryUsage,
+        substitutionUsage,
       };
     }
 
-    const parsed = await this.calc.parseData(params);
     const { min, max } = this.inv.computeMinMaxFromTree(real.tree, requiredQuantity, parsed, params);
 
     const blendedTotalTime = successWeight * min.totalTime + (1 - successWeight) * max.totalTime;
     const blendedTimePerShard = requiredQuantity > 0 ? blendedTotalTime / requiredQuantity : 0;
 
-    return { min, max, blendedTotalTime, blendedTimePerShard, successWeight, remainingInventory: real.remainingInventory, inventoryUsage };
+    return { min, max, blendedTotalTime, blendedTimePerShard, successWeight, remainingInventory: real.remainingInventory, substitutionUsage };
   }
 
   /**
-   * Walks a fixed tree and sums up how much of each shard came from
-   * "inventory" (stock) nodes rather than being farmed or crafted fresh —
-   * i.e. exactly the substitution amounts the greedy scan is relying on.
-   * Independent of min/max luck since both replay the same tree structure.
+   * Walks a fixed tree and records every point where stock was drawn
+   * instead of farming, keeping the parent recipe (what it was used to
+   * craft) attached to each entry — so "23x Cod used for Kraken" and "5x Cod
+   * used for Coralot" show up as two separate, readable entries rather than
+   * a single flattened "28x Cod used" number with no context.
    */
-  private collectInventoryUsage(tree: InventoryRecipeTree, usage: Map<string, number> = new Map()): Map<string, number> {
+  private collectSubstitutionUsage(tree: InventoryRecipeTree, data: Data): SubstitutionUsageEntry[] {
+    const usage = new Map<string, SubstitutionUsageEntry>();
+    this.walkSubstitutionUsage(tree, data, null, usage);
+    return Array.from(usage.values());
+  }
+
+  private walkSubstitutionUsage(
+    tree: InventoryRecipeTree,
+    data: Data,
+    parentShardId: string | null,
+    usage: Map<string, SubstitutionUsageEntry>
+  ): void {
     if (Array.isArray(tree)) {
-      tree.forEach((node) => this.collectInventoryUsage(node, usage));
-      return usage;
+      tree.forEach((node) => this.walkSubstitutionUsage(node, data, parentShardId, usage));
+      return;
     }
+
     if (tree.method === "inventory") {
-      usage.set(tree.shard, (usage.get(tree.shard) || 0) + tree.quantity);
+      const usedInId = parentShardId ?? tree.shard;
+      const key = `${tree.shard}::${usedInId}`;
+      const substitute = data.shards[tree.shard];
+      const usedIn = data.shards[usedInId];
+      const unitTime = substitute ? this.calc.getDirectCost(substitute, false) : NaN;
+      const timeValue = Number.isFinite(unitTime) ? unitTime * tree.quantity : 0;
+
+      const existing = usage.get(key);
+      if (existing) {
+        existing.quantity += tree.quantity;
+        existing.timeValue += timeValue;
+      } else {
+        usage.set(key, {
+          substituteShardId: tree.shard,
+          substituteName: substitute?.name ?? tree.shard,
+          usedInShardId: usedInId,
+          usedInName: usedIn?.name ?? usedInId,
+          quantity: tree.quantity,
+          timeValue,
+        });
+      }
     } else if (tree.method === "recipe") {
-      this.collectInventoryUsage(tree.inputs[0], usage);
-      this.collectInventoryUsage(tree.inputs[1], usage);
+      this.walkSubstitutionUsage(tree.inputs[0], data, tree.shard, usage);
+      this.walkSubstitutionUsage(tree.inputs[1], data, tree.shard, usage);
     } else if (tree.method === "cycle") {
-      this.collectInventoryUsage(tree.inputRecipe, usage);
-      tree.cycleInputs.forEach((node) => this.collectInventoryUsage(node, usage));
+      this.walkSubstitutionUsage(tree.inputRecipe, data, tree.shard, usage);
+      tree.cycleInputs.forEach((node) => this.walkSubstitutionUsage(node, data, tree.shard, usage));
     }
-    return usage;
   }
 
   /** Flattens combined min/max total-quantity maps into rows the UI can render directly. */
@@ -291,6 +360,86 @@ export class ShardOptimizationService {
   }
 
   /**
+   * For shards sitting genuinely idle (excessInventory), finds recipes for
+   * still-needed shards that could use them as an input instead of the
+   * ingredient currently being farmed for that recipe. These are NOT
+   * currently applied by the plan — the core engine picks recipes by raw
+   * farm cost without knowing what you happen to already have surplus of,
+   * so this surfaces opportunities it's missing rather than auto-replanning
+   * around them (that would mean re-running the whole optimizer with a
+   * forced recipe choice, which isn't done here).
+   *
+   * Estimates are independent per suggestion — if two suggestions both rely
+   * on the same excess shard, taking both isn't necessarily additive.
+   */
+  computeExcessSubstitutionSuggestions(
+    excessInventory: ExcessInventoryEntry[],
+    minQuantities: Map<string, number>,
+    data: Data,
+    params: CalculationParams,
+    limit = 10
+  ): ExcessSubstitutionSuggestion[] {
+    const { crocodileMultiplier, craftPenalty } = this.calc.calculateMultipliers(params);
+    const suggestions: ExcessSubstitutionSuggestion[] = [];
+
+    for (const excess of excessInventory) {
+      const excessShard = data.shards[excess.shardId];
+      if (!excessShard || excess.quantity <= 0) continue;
+
+      for (const [targetId, neededQty] of minQuantities.entries()) {
+        if (neededQty <= 0 || targetId === excess.shardId) continue;
+
+        const targetShard = data.shards[targetId];
+        if (!targetShard) continue;
+
+        const matchingRecipes = (data.recipes[targetId] || []).filter((r) => r.inputs.includes(excess.shardId));
+
+        for (const recipe of matchingRecipes) {
+          const replacesId = recipe.inputs.find((id) => id !== excess.shardId);
+          if (!replacesId || replacesId === excess.shardId) continue;
+
+          const replacesShard = data.shards[replacesId];
+          if (!replacesShard) continue;
+
+          const outputQty = this.calc.getEffectiveOutputQuantity(recipe, crocodileMultiplier);
+          if (outputQty <= 0) continue;
+
+          const craftsFromExcess = Math.floor(excess.quantity / excessShard.fuse_amount);
+          const craftsNeededForTarget = Math.ceil(neededQty / outputQty);
+          const craftsUsable = Math.min(craftsFromExcess, craftsNeededForTarget);
+          if (craftsUsable <= 0) continue;
+
+          const quantityOfTargetCovered = Math.min(neededQty, craftsUsable * outputQty);
+
+          const normalUnitCost = this.calc.getDirectCost(targetShard, false);
+          const replacesUnitCost = this.calc.getDirectCost(replacesShard, false);
+          if (!Number.isFinite(normalUnitCost) || !Number.isFinite(replacesUnitCost)) continue;
+
+          // Cost if we go the excess route: excess itself is free (already idle), we still pay for the other input.
+          const costPerCraftViaExcess = (replacesUnitCost * replacesShard.fuse_amount + craftPenalty) / outputQty;
+          const timeSaved = quantityOfTargetCovered * normalUnitCost - craftsUsable * costPerCraftViaExcess;
+          if (timeSaved <= 0) continue;
+
+          suggestions.push({
+            excessShardId: excess.shardId,
+            excessName: excessShard.name,
+            excessAvailable: excess.quantity,
+            targetShardId: targetId,
+            targetName: targetShard.name,
+            replacesShardId: replacesId,
+            replacesName: replacesShard.name,
+            craftsUsable,
+            quantityOfTargetCovered,
+            timeSaved,
+          });
+        }
+      }
+    }
+
+    return suggestions.sort((a, b) => b.timeSaved - a.timeSaved).slice(0, limit);
+  }
+
+  /**
    * The main entry point: automatically scans every shard the player hasn't
    * maxed yet (no target shard needed), and returns the shortest-to-max
    * ranking plus a combined min/max shopping list, trap priority, and
@@ -361,7 +510,8 @@ export class ShardOptimizationService {
     const shortestToMax: ShortestToMaxEntry[] = [];
     const combinedMinQuantities = new Map<string, number>();
     const combinedMaxQuantities = new Map<string, number>();
-    const combinedSubstitutedQuantities = new Map<string, number>();
+    const combinedSubstitutedQuantities = new Map<string, number>(); // per-shard, for the shopping-list "From Stock" column
+    const substitutionUsageByKey = new Map<string, SubstitutionUsageEntry>(); // per (substitute, usedIn) pair, for the detailed breakdown
     let combinedBlendedTotalTime = 0;
 
     // Greedy, longest-to-get first, ONE shared inventory pool that depletes
@@ -384,6 +534,8 @@ export class ShardOptimizationService {
         ownedAttributes
       );
 
+      const substitutedCount = list.substitutionUsage.reduce((sum, e) => sum + e.quantity, 0);
+
       shortestToMax.push({
         shardId: candidate.shardId,
         name: candidate.shard.name,
@@ -392,6 +544,7 @@ export class ShardOptimizationService {
         maxCount: MAX_QUANTITIES[candidate.shard.rarity],
         quantityNeeded: candidate.quantityNeeded,
         blendedTime: list.blendedTotalTime,
+        substitutedCount,
       });
       combinedBlendedTotalTime += list.blendedTotalTime;
 
@@ -401,8 +554,17 @@ export class ShardOptimizationService {
       for (const [id, qty] of list.max.totalQuantities.entries()) {
         combinedMaxQuantities.set(id, (combinedMaxQuantities.get(id) || 0) + qty);
       }
-      for (const [id, qty] of list.inventoryUsage.entries()) {
-        combinedSubstitutedQuantities.set(id, (combinedSubstitutedQuantities.get(id) || 0) + qty);
+      for (const entry of list.substitutionUsage) {
+        combinedSubstitutedQuantities.set(entry.substituteShardId, (combinedSubstitutedQuantities.get(entry.substituteShardId) || 0) + entry.quantity);
+
+        const key = `${entry.substituteShardId}::${entry.usedInShardId}`;
+        const existing = substitutionUsageByKey.get(key);
+        if (existing) {
+          existing.quantity += entry.quantity;
+          existing.timeValue += entry.timeValue;
+        } else {
+          substitutionUsageByKey.set(key, { ...entry });
+        }
       }
 
       if (list.remainingInventory) {
@@ -417,6 +579,7 @@ export class ShardOptimizationService {
     const shoppingRows = this.computeShoppingListRows(combinedMinQuantities, combinedMaxQuantities, combinedSubstitutedQuantities, data);
     const trapPriority = this.computeTrapPriorityList(combinedMinQuantities, data, 10);
     const chameleonPriority = this.computeChameleonPriorityList(combinedMinQuantities, data, params, 10);
+    const substitutionsUsed = Array.from(substitutionUsageByKey.values()).sort((a, b) => b.timeValue - a.timeValue);
 
     // Whatever's left in the shared pool after every unmaxed attribute has
     // claimed what it needs — genuinely idle stock the plan never touched.
@@ -425,11 +588,15 @@ export class ShardOptimizationService {
       .map(([shardId, quantity]) => ({ shardId, name: data.shards[shardId]?.name ?? shardId, quantity }))
       .sort((a, b) => b.quantity - a.quantity);
 
+    const excessSubstitutionSuggestions = this.computeExcessSubstitutionSuggestions(excessInventory, combinedMinQuantities, data, params, 10);
+
     return {
       shortestToMax,
       shoppingRows,
       trapPriority,
       chameleonPriority,
+      substitutionsUsed,
+      excessSubstitutionSuggestions,
       combinedBlendedTotalTime,
       candidateCount: ranked.length,
       excessInventory,

@@ -221,7 +221,9 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
           {activeTab === "shortest" && (
             <div className="space-y-2">
               <p className="text-xs text-slate-400">
-                Every unmaxed attribute, fastest to max first — blended min/max time using your own recipe/inventory setup.
+                Every unmaxed attribute, fastest to max first — blended min/max time using your own recipe/inventory setup.{" "}
+                <span className="text-emerald-400">Uses N from stock</span> means part of that plan is already covered by your
+                inventory instead of being farmed — see the Excess Inventory tab for exactly where.
               </p>
               <ol className="space-y-1.5">
                 {result.shortestToMax.map((entry, i) => (
@@ -233,6 +235,7 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
                         <span className={`text-sm truncate block ${getRarityColor(entry.rarity)}`}>{entry.name}</span>
                         <span className="text-slate-500 text-xs">
                           {entry.ownedCount}/{entry.maxCount} shards • {entry.quantityNeeded} more needed
+                          {entry.substitutedCount > 0 && <span className="text-emerald-400"> • uses {Math.floor(entry.substitutedCount)} from stock</span>}
                         </span>
                       </div>
                     </div>
@@ -244,30 +247,102 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
           )}
 
           {activeTab === "excess" && (
-            <div className="space-y-2">
-              <p className="text-xs text-slate-400">
-                Shards left over after every unmaxed attribute has claimed what it needs — processed longest-to-get first, so
-                the biggest grinds get first pick of your stockpile and whatever's shown here genuinely isn't needed by
-                anything on your plate right now.
-              </p>
-              {result.excessInventory.length === 0 ? (
-                <EmptyRow text="Nothing left over — your inventory is fully spoken for by your remaining grind." />
-              ) : (
-                <ol className="space-y-1.5">
-                  {result.excessInventory.map((entry) => (
-                    <li
-                      key={entry.shardId}
-                      className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
-                    >
-                      <div className="flex items-center min-w-0">
-                        <ShardIcon shardId={entry.shardId} name={entry.name} />
-                        <span className="text-white text-sm truncate">{entry.name}</span>
-                      </div>
-                      <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">{Math.floor(entry.quantity)}x unused</span>
-                    </li>
-                  ))}
-                </ol>
-              )}
+            <div className="space-y-5">
+              {/* Section 1: what's actually being substituted right now */}
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-white uppercase tracking-wide">Used — already substituted into your plan</h4>
+                <p className="text-xs text-slate-400">
+                  Ranked by how much farming this is saving you. Processed longest-to-get shard first, so your stock goes to the
+                  biggest grinds before anything else. The same shard used toward two different recipes shows as two separate
+                  rows.
+                </p>
+                {result.substitutionsUsed.length === 0 ? (
+                  <EmptyRow text="No stock substitution is happening yet — nothing in your inventory overlaps with what your plan currently needs." />
+                ) : (
+                  <ol className="space-y-1.5">
+                    {result.substitutionsUsed.map((entry, i) => (
+                      <li
+                        key={`${entry.substituteShardId}::${entry.usedInShardId}`}
+                        className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
+                      >
+                        <div className="flex items-center min-w-0">
+                          <span className="text-slate-500 text-xs w-5 flex-shrink-0">{i + 1}.</span>
+                          <ShardIcon shardId={entry.substituteShardId} name={entry.substituteName} />
+                          <div className="min-w-0">
+                            <span className="text-white text-sm truncate block">
+                              {Math.floor(entry.quantity)}x {entry.substituteName}
+                            </span>
+                            <span className="text-slate-400 text-xs">used toward {entry.usedInName}</span>
+                          </div>
+                        </div>
+                        <span className="text-emerald-400 text-sm font-medium flex-shrink-0 ml-2">{formatTime(entry.timeValue)} saved</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+
+              {/* Section 2: idle excess that COULD be used if a recipe were switched */}
+              <div className="space-y-2 border-t border-slate-700/60 pt-4">
+                <h4 className="text-xs font-semibold text-white uppercase tracking-wide">Suggested — not applied yet</h4>
+                <p className="text-xs text-slate-400">
+                  Idle excess that has a valid recipe for something you still need, which the planner isn't using because it
+                  picked a different ingredient by raw farm cost. Switching would use up the excess instead of farming more —
+                  these are estimates, not auto-applied, and don't all stack if they share the same excess shard.
+                </p>
+                {result.excessSubstitutionSuggestions.length === 0 ? (
+                  <EmptyRow text="No unused-but-usable substitutions found for your current excess." />
+                ) : (
+                  <ol className="space-y-1.5">
+                    {result.excessSubstitutionSuggestions.map((entry, i) => (
+                      <li
+                        key={`${entry.excessShardId}::${entry.targetShardId}::${entry.replacesShardId}`}
+                        className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
+                      >
+                        <div className="flex items-center min-w-0">
+                          <span className="text-slate-500 text-xs w-5 flex-shrink-0">{i + 1}.</span>
+                          <ShardIcon shardId={entry.excessShardId} name={entry.excessName} />
+                          <div className="min-w-0">
+                            <span className="text-white text-sm truncate block">
+                              Use {entry.craftsUsable}x {entry.excessName} in {entry.targetName}
+                            </span>
+                            <span className="text-slate-400 text-xs">
+                              instead of farming {entry.replacesName} • covers {Math.floor(entry.quantityOfTargetCovered)}x {entry.targetName}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="text-fuchsia-300 text-sm font-medium flex-shrink-0 ml-2">~{formatTime(entry.timeSaved)}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+
+              {/* Section 3: genuinely unused leftover, no known use found */}
+              <div className="space-y-2 border-t border-slate-700/60 pt-4">
+                <h4 className="text-xs font-semibold text-white uppercase tracking-wide">Unused — no use found</h4>
+                <p className="text-xs text-slate-400">
+                  Left over after everything above, with no matching recipe found for anything you still need.
+                </p>
+                {result.excessInventory.length === 0 ? (
+                  <EmptyRow text="Nothing left over — your inventory is fully spoken for by your remaining grind." />
+                ) : (
+                  <ol className="space-y-1.5">
+                    {result.excessInventory.map((entry) => (
+                      <li
+                        key={entry.shardId}
+                        className="bg-slate-700/50 border border-slate-600/60 rounded-md px-3 py-2 flex items-center justify-between"
+                      >
+                        <div className="flex items-center min-w-0">
+                          <ShardIcon shardId={entry.shardId} name={entry.name} />
+                          <span className="text-white text-sm truncate">{entry.name}</span>
+                        </div>
+                        <span className="text-slate-400 text-sm font-medium flex-shrink-0 ml-2">{Math.floor(entry.quantity)}x unused</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
             </div>
           )}
         </>
