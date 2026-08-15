@@ -1,0 +1,285 @@
+diff --git a/src/components/results/ShardOptimizationsPanel.tsx b/src/components/results/ShardOptimizationsPanel.tsx
+index 8100ee1..5cfe9f1 100644
+--- a/src/components/results/ShardOptimizationsPanel.tsx
++++ b/src/components/results/ShardOptimizationsPanel.tsx
+@@ -1,7 +1,7 @@
+ import React, { useEffect, useState } from "react";
+ import { Crosshair, Sparkles, Timer, Loader2, ListChecks, RefreshCw, PackageOpen } from "lucide-react";
+ import { formatTime, getRarityColor } from "../../utilities";
+-import { ShardOptimizationService } from "../../services";
++import { computeGlobalOptimizationsWithWorker } from "../../services";
+ import type { GlobalOptimizationResult, ScanProgress } from "../../services";
+ import type { CalculationParams, RecipeOverride } from "../../types/types";
+ 
+@@ -32,30 +32,35 @@ const ShardIcon: React.FC<{ shardId: string; name: string }> = ({ shardId, name
+ );
+ 
+ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = ({ params, inventory, ownedAttributes, recipeOverrides }) => {
+-  const shardOptimizationService = ShardOptimizationService.getInstance();
+   const [activeTab, setActiveTab] = useState<TabKey>("shopping");
+   const [result, setResult] = useState<GlobalOptimizationResult | null>(null);
+   const [progress, setProgress] = useState<ScanProgress | null>(null);
+   const [loading, setLoading] = useState(false);
+   const [refreshToken, setRefreshToken] = useState(0);
+ 
++  // Runs the whole scan in a Web Worker so a big unmaxed-shard list doesn't
++  // freeze the tab — the sequential greedy pass can genuinely take a while
++  // and shouldn't tie up the main thread while it runs.
+   useEffect(() => {
+     let cancelled = false;
+     setLoading(true);
+     setProgress(null);
+-    shardOptimizationService
+-      .computeGlobalOptimizations(params, inventory, ownedAttributes, recipeOverrides, (p) => !cancelled && setProgress(p))
++
++    const { promise, cancel } = computeGlobalOptimizationsWithWorker(params, inventory, ownedAttributes, recipeOverrides, (p) => !cancelled && setProgress(p));
++
++    promise
+       .then((res) => !cancelled && setResult(res))
+-      .catch((err) => console.error("Global optimization scan failed:", err))
++      .catch((err) => !cancelled && console.error("Global optimization scan failed:", err))
+       .finally(() => !cancelled && setLoading(false));
++
+     return () => {
+       cancelled = true;
++      cancel();
+     };
+     // refreshToken lets the "Rescan" button force a recompute even if inputs are unchanged
+-  }, [params, inventory, ownedAttributes, recipeOverrides, refreshToken, shardOptimizationService]);
++  }, [params, inventory, ownedAttributes, recipeOverrides, refreshToken]);
+ 
+   const handleRescan = () => {
+-    shardOptimizationService.invalidateGlobalCache();
+     setRefreshToken((t) => t + 1);
+   };
+ 
+@@ -85,9 +90,17 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
+       </p>
+ 
+       {loading && (
+-        <div className="flex items-center gap-2 text-slate-400 text-sm py-3">
+-          <Loader2 className="w-4 h-4 animate-spin" />
+-          {progress ? `Scanning shards (${progress.completed}/${progress.total})...` : "Scanning shards..."}
++        <div className="space-y-2 py-3">
++          <div className="flex items-center gap-2 text-slate-400 text-sm">
++            <Loader2 className="w-4 h-4 animate-spin" />
++            {progress ? `Scanning shards (${progress.completed}/${progress.total})...` : "Scanning shards..."}
++          </div>
++          <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
++            <div
++              className="h-full rounded-full bg-fuchsia-500 transition-all duration-200 ease-out"
++              style={{ width: progress && progress.total > 0 ? `${Math.min(100, (progress.completed / progress.total) * 100)}%` : "8%" }}
++            />
++          </div>
+         </div>
+       )}
+ 
+diff --git a/src/services/index.ts b/src/services/index.ts
+index ecb5fce..491c7a6 100644
+--- a/src/services/index.ts
++++ b/src/services/index.ts
+@@ -2,6 +2,7 @@ export { CalculationService } from "./calculationService";
+ export { buildCalculationParams } from "./calculationParams";
+ export { InvCalculationService } from "./invCalculationService";
+ export { ShardOptimizationService } from "./shardOptimizationService";
++export { computeGlobalOptimizationsWithWorker } from "./shardOptimizationWorkerService";
+ export type {
+   MinMaxShoppingList,
+   ShardTimeEntry,
+diff --git a/src/services/shardOptimizationService.ts b/src/services/shardOptimizationService.ts
+index 214ca7d..15cb30a 100644
+--- a/src/services/shardOptimizationService.ts
++++ b/src/services/shardOptimizationService.ts
+@@ -137,18 +137,10 @@ export interface ScanProgress {
+   total: number;
+ }
+ 
+-function serializeMap(map: Map<string, number>): string {
+-  return Array.from(map.entries())
+-    .sort(([a], [b]) => a.localeCompare(b))
+-    .map(([k, v]) => `${k}:${v}`)
+-    .join(",");
+-}
+-
+ export class ShardOptimizationService {
+   private static instance: ShardOptimizationService;
+   private calc = new CalculationService();
+   private inv = InvCalculationService.getInstance();
+-  private globalCache: { key: string; promise: Promise<GlobalOptimizationResult> } | null = null;
+ 
+   public static getInstance(): ShardOptimizationService {
+     if (!ShardOptimizationService.instance) {
+@@ -445,10 +437,11 @@ export class ShardOptimizationService {
+    * ranking plus a combined min/max shopping list, trap priority, and
+    * chameleon priority across all of them at once.
+    *
+-   * Results are cached and reused as long as params/inventory/attributes/
+-   * recipeOverrides haven't changed, since a full scan runs up to two
+-   * optimal-path calculations per unmaxed shard. `onProgress` is called
+-   * after each batch so the UI can show scan progress.
++   * This is the actual heavy-lifting implementation — it's meant to be run
++   * inside `shardOptimizationWorker.ts` (off the main thread), since a full
++   * scan runs up to two optimal-path calculations per unmaxed shard and can
++   * take a while. `onProgress` is called after each shard so the UI (via
++   * the worker's postMessage bridge) can show scan progress.
+    */
+   async computeGlobalOptimizations(
+     params: CalculationParams,
+@@ -456,34 +449,6 @@ export class ShardOptimizationService {
+     ownedAttributes: Map<string, number>,
+     recipeOverrides: RecipeOverride[] = [],
+     onProgress?: (progress: ScanProgress) => void
+-  ): Promise<GlobalOptimizationResult> {
+-    const cacheKey = JSON.stringify({
+-      params,
+-      inventory: serializeMap(inventory),
+-      ownedAttributes: serializeMap(ownedAttributes),
+-      recipeOverrides,
+-    });
+-
+-    if (this.globalCache && this.globalCache.key === cacheKey) {
+-      return this.globalCache.promise;
+-    }
+-
+-    const promise = this.computeGlobalOptimizationsUncached(params, inventory, ownedAttributes, recipeOverrides, onProgress);
+-    this.globalCache = { key: cacheKey, promise };
+-    return promise;
+-  }
+-
+-  /** Drops the cached result so the next computeGlobalOptimizations call recomputes from scratch. */
+-  invalidateGlobalCache(): void {
+-    this.globalCache = null;
+-  }
+-
+-  private async computeGlobalOptimizationsUncached(
+-    params: CalculationParams,
+-    inventory: Map<string, number>,
+-    ownedAttributes: Map<string, number>,
+-    recipeOverrides: RecipeOverride[],
+-    onProgress?: (progress: ScanProgress) => void
+   ): Promise<GlobalOptimizationResult> {
+     const data = await this.calc.parseData(params);
+ 
+diff --git a/src/services/shardOptimizationWorkerService.ts b/src/services/shardOptimizationWorkerService.ts
+new file mode 100644
+index 0000000..7957b11
+--- /dev/null
++++ b/src/services/shardOptimizationWorkerService.ts
+@@ -0,0 +1,62 @@
++import type { GlobalOptimizationResult, ScanProgress } from "./shardOptimizationService";
++import type { CalculationParams, RecipeOverride } from "../types/types";
++
++type WorkerOutMsg =
++  | { type: "progress"; completed: number; total: number }
++  | { type: "result"; result: GlobalOptimizationResult }
++  | { type: "error"; message: string };
++
++type WorkerStartMsg = {
++  type: "start";
++  params: CalculationParams;
++  inventory: Map<string, number>;
++  ownedAttributes: Map<string, number>;
++  recipeOverrides: RecipeOverride[];
++};
++
++/**
++ * Runs the full unmaxed-shard optimization scan on a background thread
++ * instead of blocking the UI — a full scan can run up to two optimal-path
++ * calculations per unmaxed shard, sequentially (the greedy shared-inventory
++ * pass can't be parallelized), which is exactly the kind of work that
++ * shouldn't tie up the main thread. Mirrors the existing
++ * `calculateOptimalPathWithWorker` pattern used for the Calculator tab.
++ */
++export function computeGlobalOptimizationsWithWorker(
++  params: CalculationParams,
++  inventory: Map<string, number>,
++  ownedAttributes: Map<string, number>,
++  recipeOverrides: RecipeOverride[] = [],
++  onProgress?: (progress: ScanProgress) => void
++): { promise: Promise<GlobalOptimizationResult>; cancel: () => void } {
++  const worker = new Worker(new URL("../workers/shardOptimizationWorker.ts", import.meta.url), { type: "module" });
++
++  const promise = new Promise<GlobalOptimizationResult>((resolve, reject) => {
++    worker.onmessage = (event: MessageEvent<WorkerOutMsg>) => {
++      const data = event.data;
++      if (!data || !("type" in data)) return;
++
++      if (data.type === "progress") {
++        onProgress?.({ completed: data.completed, total: data.total });
++      } else if (data.type === "result") {
++        worker.terminate();
++        resolve(data.result);
++      } else if (data.type === "error") {
++        worker.terminate();
++        reject(new Error(data.message || "Optimization scan failed"));
++      }
++    };
++
++    worker.onerror = (err) => {
++      worker.terminate();
++      reject(err instanceof ErrorEvent ? new Error(err.message) : new Error("Optimization scan failed"));
++    };
++
++    const startMsg: WorkerStartMsg = { type: "start", params, inventory, ownedAttributes, recipeOverrides };
++    worker.postMessage(startMsg);
++  });
++
++  const cancel = () => worker.terminate();
++
++  return { promise, cancel };
++}
+diff --git a/src/workers/shardOptimizationWorker.ts b/src/workers/shardOptimizationWorker.ts
+new file mode 100644
+index 0000000..f4766ff
+--- /dev/null
++++ b/src/workers/shardOptimizationWorker.ts
+@@ -0,0 +1,49 @@
++import { ShardOptimizationService } from "../services/shardOptimizationService";
++import type { GlobalOptimizationResult, ScanProgress } from "../services/shardOptimizationService";
++import type { CalculationParams, RecipeOverride } from "../types/types";
++
++interface StartMsg {
++  type: "start";
++  params: CalculationParams;
++  inventory: Map<string, number>;
++  ownedAttributes: Map<string, number>;
++  recipeOverrides: RecipeOverride[];
++}
++
++interface ProgressMsg {
++  type: "progress";
++  completed: number;
++  total: number;
++}
++interface ResultMsg {
++  type: "result";
++  result: GlobalOptimizationResult;
++}
++interface ErrorMsg {
++  type: "error";
++  message: string;
++}
++
++type OutMsg = ProgressMsg | ResultMsg | ErrorMsg;
++
++const post = (msg: OutMsg) => (postMessage as (m: OutMsg) => void)(msg);
++
++self.onmessage = async (e: MessageEvent<StartMsg>) => {
++  const data = e.data;
++  if (!data || data.type !== "start") return;
++
++  try {
++    const service = ShardOptimizationService.getInstance();
++    const result = await service.computeGlobalOptimizations(
++      data.params,
++      data.inventory,
++      data.ownedAttributes,
++      data.recipeOverrides,
++      (progress: ScanProgress) => post({ type: "progress", completed: progress.completed, total: progress.total })
++    );
++    post({ type: "result", result });
++  } catch (err: unknown) {
++    const message = err instanceof Error ? err.message : "Optimization scan failed";
++    post({ type: "error", message });
++  }
++};

@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Crosshair, Sparkles, Timer, Loader2, ListChecks, RefreshCw, PackageOpen } from "lucide-react";
 import { formatTime, getRarityColor } from "../../utilities";
-import { ShardOptimizationService } from "../../services";
+import { computeGlobalOptimizationsWithWorker } from "../../services";
 import type { GlobalOptimizationResult, ScanProgress } from "../../services";
 import type { CalculationParams, RecipeOverride } from "../../types/types";
 
@@ -32,30 +32,35 @@ const ShardIcon: React.FC<{ shardId: string; name: string }> = ({ shardId, name 
 );
 
 export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = ({ params, inventory, ownedAttributes, recipeOverrides }) => {
-  const shardOptimizationService = ShardOptimizationService.getInstance();
   const [activeTab, setActiveTab] = useState<TabKey>("shopping");
   const [result, setResult] = useState<GlobalOptimizationResult | null>(null);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [loading, setLoading] = useState(false);
   const [refreshToken, setRefreshToken] = useState(0);
 
+  // Runs the whole scan in a Web Worker so a big unmaxed-shard list doesn't
+  // freeze the tab — the sequential greedy pass can genuinely take a while
+  // and shouldn't tie up the main thread while it runs.
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setProgress(null);
-    shardOptimizationService
-      .computeGlobalOptimizations(params, inventory, ownedAttributes, recipeOverrides, (p) => !cancelled && setProgress(p))
+
+    const { promise, cancel } = computeGlobalOptimizationsWithWorker(params, inventory, ownedAttributes, recipeOverrides, (p) => !cancelled && setProgress(p));
+
+    promise
       .then((res) => !cancelled && setResult(res))
-      .catch((err) => console.error("Global optimization scan failed:", err))
+      .catch((err) => !cancelled && console.error("Global optimization scan failed:", err))
       .finally(() => !cancelled && setLoading(false));
+
     return () => {
       cancelled = true;
+      cancel();
     };
     // refreshToken lets the "Rescan" button force a recompute even if inputs are unchanged
-  }, [params, inventory, ownedAttributes, recipeOverrides, refreshToken, shardOptimizationService]);
+  }, [params, inventory, ownedAttributes, recipeOverrides, refreshToken]);
 
   const handleRescan = () => {
-    shardOptimizationService.invalidateGlobalCache();
     setRefreshToken((t) => t + 1);
   };
 
@@ -85,9 +90,17 @@ export const ShardOptimizationsPanel: React.FC<ShardOptimizationsPanelProps> = (
       </p>
 
       {loading && (
-        <div className="flex items-center gap-2 text-slate-400 text-sm py-3">
-          <Loader2 className="w-4 h-4 animate-spin" />
-          {progress ? `Scanning shards (${progress.completed}/${progress.total})...` : "Scanning shards..."}
+        <div className="space-y-2 py-3">
+          <div className="flex items-center gap-2 text-slate-400 text-sm">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            {progress ? `Scanning shards (${progress.completed}/${progress.total})...` : "Scanning shards..."}
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-slate-700 overflow-hidden">
+            <div
+              className="h-full rounded-full bg-fuchsia-500 transition-all duration-200 ease-out"
+              style={{ width: progress && progress.total > 0 ? `${Math.min(100, (progress.completed / progress.total) * 100)}%` : "8%" }}
+            />
+          </div>
         </div>
       )}
 

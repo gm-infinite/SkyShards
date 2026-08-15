@@ -137,18 +137,10 @@ export interface ScanProgress {
   total: number;
 }
 
-function serializeMap(map: Map<string, number>): string {
-  return Array.from(map.entries())
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `${k}:${v}`)
-    .join(",");
-}
-
 export class ShardOptimizationService {
   private static instance: ShardOptimizationService;
   private calc = new CalculationService();
   private inv = InvCalculationService.getInstance();
-  private globalCache: { key: string; promise: Promise<GlobalOptimizationResult> } | null = null;
 
   public static getInstance(): ShardOptimizationService {
     if (!ShardOptimizationService.instance) {
@@ -445,44 +437,17 @@ export class ShardOptimizationService {
    * ranking plus a combined min/max shopping list, trap priority, and
    * chameleon priority across all of them at once.
    *
-   * Results are cached and reused as long as params/inventory/attributes/
-   * recipeOverrides haven't changed, since a full scan runs up to two
-   * optimal-path calculations per unmaxed shard. `onProgress` is called
-   * after each batch so the UI can show scan progress.
+   * This is the actual heavy-lifting implementation — it's meant to be run
+   * inside `shardOptimizationWorker.ts` (off the main thread), since a full
+   * scan runs up to two optimal-path calculations per unmaxed shard and can
+   * take a while. `onProgress` is called after each shard so the UI (via
+   * the worker's postMessage bridge) can show scan progress.
    */
   async computeGlobalOptimizations(
     params: CalculationParams,
     inventory: Map<string, number>,
     ownedAttributes: Map<string, number>,
     recipeOverrides: RecipeOverride[] = [],
-    onProgress?: (progress: ScanProgress) => void
-  ): Promise<GlobalOptimizationResult> {
-    const cacheKey = JSON.stringify({
-      params,
-      inventory: serializeMap(inventory),
-      ownedAttributes: serializeMap(ownedAttributes),
-      recipeOverrides,
-    });
-
-    if (this.globalCache && this.globalCache.key === cacheKey) {
-      return this.globalCache.promise;
-    }
-
-    const promise = this.computeGlobalOptimizationsUncached(params, inventory, ownedAttributes, recipeOverrides, onProgress);
-    this.globalCache = { key: cacheKey, promise };
-    return promise;
-  }
-
-  /** Drops the cached result so the next computeGlobalOptimizations call recomputes from scratch. */
-  invalidateGlobalCache(): void {
-    this.globalCache = null;
-  }
-
-  private async computeGlobalOptimizationsUncached(
-    params: CalculationParams,
-    inventory: Map<string, number>,
-    ownedAttributes: Map<string, number>,
-    recipeOverrides: RecipeOverride[],
     onProgress?: (progress: ScanProgress) => void
   ): Promise<GlobalOptimizationResult> {
     const data = await this.calc.parseData(params);

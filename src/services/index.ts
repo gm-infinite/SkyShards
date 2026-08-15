@@ -2,6 +2,7 @@ export { CalculationService } from "./calculationService";
 export { buildCalculationParams } from "./calculationParams";
 export { InvCalculationService } from "./invCalculationService";
 export { ShardOptimizationService } from "./shardOptimizationService";
+export { computeGlobalOptimizationsWithWorker } from "./shardOptimizationWorkerService";
 export type {
   MinMaxShoppingList,
   ShardTimeEntry,
